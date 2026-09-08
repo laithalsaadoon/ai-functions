@@ -335,6 +335,7 @@ class LocalWorker(WorkerAdapter):
         "_cancel_signals",
         "_records",
         "_registered",
+        "_reaping",
     )
 
     _coordinator: Coordinator
@@ -347,6 +348,7 @@ class LocalWorker(WorkerAdapter):
     _cancel_signals: dict[ThreadId, asyncio.Event]
     _records: dict[ThreadId, _ThreadRecord]
     _registered: bool
+    _reaping: set[asyncio.Task[None]]
 
     def __init__(
         self,
@@ -364,6 +366,7 @@ class LocalWorker(WorkerAdapter):
         self._cancel_signals = {}
         self._records = {}
         self._registered = False
+        self._reaping = set()
 
     async def register(self) -> Self:
         """Register this worker with the coordinator.
@@ -843,8 +846,12 @@ class LocalWorker(WorkerAdapter):
             _ = asyncio.create_task(thread.teardown())
 
         # Deregister from the coordinator asynchronously; the coordinator
-        # drops the info and the routing entry.
-        _ = asyncio.create_task(self._coordinator.deregister_thread(thread_id))
+        # drops the info and the routing entry. ``close`` awaits these tasks
+        # before it deregisters the worker, so a clean shutdown never leaves a
+        # torn-down thread in the registry for ``deregister_worker`` to fail.
+        reap = asyncio.create_task(self._coordinator.deregister_thread(thread_id))
+        self._reaping.add(reap)
+        reap.add_done_callback(self._reaping.discard)
 
         self._threads.pop(thread_id, None)
         self._queues.pop(thread_id, None)
@@ -881,6 +888,17 @@ class LocalWorker(WorkerAdapter):
         for d in dispatchers:
             try:
                 await d
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # ``_teardown`` schedules each thread's deregistration rather than
+        # awaiting it. Draining those tasks here is what makes this a clean
+        # shutdown: ``deregister_worker`` fails every thread the worker still
+        # hosts, so a thread whose deregistration were still pending would be
+        # published as ``failed`` after an orderly close.
+        for reap in list(self._reaping):
+            try:
+                await reap
             except (asyncio.CancelledError, Exception):
                 pass
 

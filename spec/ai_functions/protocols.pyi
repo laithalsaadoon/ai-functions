@@ -381,18 +381,32 @@ class Coordinator(Protocol):
         ...
 
     async def deregister_worker(self, worker_id: WorkerId) -> None:
-        """Remove a worker from the pool.
+        """Remove a worker from the pool and fail the threads it still hosted.
 
-        All threads hosted by that worker are implicitly removed from
-        the routing table as part of the worker's own ``close`` flow;
-        this method should be called after the worker's threads are
-        already terminated.
+        An orderly ``LocalWorker.close`` terminates and deregisters every
+        thread first, so this call normally finds none left. The call that
+        matters is the crash path — the network endpoint invokes it when a
+        client's socket drops — where threads are still registered against a
+        worker that will never answer again.
+
+        Every such thread that is not already in a terminal status is failed:
+        a ``FAILED`` event naming ``worker_id`` is appended to its log and its
+        ``ThreadInfo.status`` becomes ``ThreadStatus.FAILED``. The thread stays
+        in :meth:`list_threads` and its log stays replayable, but any operation
+        that must route to a worker raises ``WorkerLostError``. Leaving the
+        status untouched would publish a thread that discovery offers and every
+        routed call refuses.
 
         Args:
             worker_id: Id of the worker to remove.
 
+        Ensures:
+            No thread hosted by ``worker_id`` is left in a non-terminal
+            status.
+
         Concurrency:
-            Idempotent; removing an unknown id is a no-op.
+            Idempotent; removing an unknown id is a no-op, and a second call
+            finds no non-terminal thread left to fail.
         """
         ...
 
@@ -599,6 +613,8 @@ class Coordinator(Protocol):
 
         Raises:
             ThreadNotFoundError: ``thread_id`` is not registered.
+            WorkerLostError: ``thread_id`` is registered but its host
+                worker is gone, so the call cannot be routed.
 
         Concurrency:
             In-process: synchronous enqueue; future resolves later.
@@ -629,6 +645,8 @@ class Coordinator(Protocol):
 
         Raises:
             ThreadNotFoundError: ``thread_id`` is not registered.
+            WorkerLostError: ``thread_id`` is registered but its host
+                worker is gone, so the call cannot be routed.
         """
         ...
 
@@ -640,6 +658,8 @@ class Coordinator(Protocol):
 
         Raises:
             ThreadNotFoundError: ``thread_id`` is not registered.
+            WorkerLostError: ``thread_id`` is registered but its host
+                worker is gone, so the call cannot be routed.
         """
         ...
 
@@ -651,6 +671,8 @@ class Coordinator(Protocol):
 
         Raises:
             ThreadNotFoundError: ``thread_id`` is not registered.
+            WorkerLostError: ``thread_id`` is registered but its host
+                worker is gone, so the call cannot be routed.
         """
         ...
 
@@ -662,6 +684,8 @@ class Coordinator(Protocol):
 
         Raises:
             ThreadNotFoundError: ``thread_id`` is not registered.
+            WorkerLostError: ``thread_id`` is registered but its host
+                worker is gone, so the call cannot be routed.
         """
         ...
 
@@ -673,6 +697,8 @@ class Coordinator(Protocol):
 
         Raises:
             ThreadNotFoundError: ``thread_id`` is not registered.
+            WorkerLostError: ``thread_id`` is registered but its host
+                worker is gone, so the call cannot be routed.
         """
         ...
 
@@ -684,6 +710,8 @@ class Coordinator(Protocol):
 
         Raises:
             ThreadNotFoundError: ``thread_id`` is not registered.
+            WorkerLostError: ``thread_id`` is registered but its host
+                worker is gone, so the call cannot be routed.
         """
         ...
 
@@ -710,6 +738,8 @@ class Coordinator(Protocol):
 
         Raises:
             ThreadNotFoundError: ``thread_id`` is not registered.
+            WorkerLostError: ``thread_id`` is registered but its host
+                worker is gone, so the call cannot be routed.
             NotImplementedError: The source thread's ``fork`` raises.
         """
         ...

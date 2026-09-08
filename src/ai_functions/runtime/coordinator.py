@@ -19,6 +19,7 @@ from ..types import (
     Event,
     EventId,
     EventKind,
+    FailedEvent,
     MessageId,
     ThreadId,
     ThreadInfo,
@@ -26,7 +27,7 @@ from ..types import (
     ThreadStatus,
     WorkerId,
 )
-from .errors import ThreadNotFoundError
+from .errors import ThreadNotFoundError, WorkerLostError
 
 if TYPE_CHECKING:
     from .worker import WorkerAdapter
@@ -132,6 +133,7 @@ class InMemoryCoordinator(Coordinator):
         "_events",
         "_subscribers",
         "_pause_events",
+        "_lost_workers",
     )
 
     def __init__(self) -> None:
@@ -140,6 +142,9 @@ class InMemoryCoordinator(Coordinator):
         self._events: dict[ThreadId, list[Event]] = {}
         self._subscribers: list[_Subscriber] = []
         self._pause_events: dict[ThreadId, asyncio.Event] = {}
+        # Threads orphaned by each lost worker, in the order they were failed.
+        # Read by ``_adapter_for`` to name the loss in ``WorkerLostError``.
+        self._lost_workers: dict[WorkerId, tuple[ThreadId, ...]] = {}
 
     # ── Worker pool ─────────────────────────────────────────────────────────
 
@@ -151,8 +156,38 @@ class InMemoryCoordinator(Coordinator):
         self._workers[wid] = adapter
 
     async def deregister_worker(self, worker_id: WorkerId) -> None:
-        """Remove a worker from the pool; idempotent."""
+        """Remove a worker from the pool and fail the threads it still hosted.
+
+        A thread whose host is gone can never run again, so leaving it
+        ``idle`` in the registry publishes a thread that ``list_threads``
+        offers and every routed operation refuses. Each non-terminal
+        thread of ``worker_id`` therefore gets a ``FailedEvent`` naming
+        the lost worker and moves to ``ThreadStatus.FAILED``, which is
+        terminal — the registry and the routing table agree again.
+
+        Concurrency:
+            Idempotent; removing an unknown id is a no-op, and a second
+            call finds no non-terminal thread left to fail.
+        """
         self._workers.pop(worker_id, None)
+        orphans = tuple(
+            thread_id
+            for thread_id, info in self._infos.items()
+            if info.worker_id == worker_id and not info.status.is_done
+        )
+        for thread_id in orphans:
+            self.append_event(
+                FailedEvent(
+                    thread_id=thread_id,
+                    thread_name=self._infos[thread_id].thread_name,
+                    error=f"WorkerLostError: worker {worker_id!r} was lost while hosting thread {thread_id!r}",
+                )
+            )
+            info = self._infos.get(thread_id)
+            if info is not None:
+                self._infos[thread_id] = info.model_copy(update={"status": ThreadStatus.FAILED})
+        if orphans:
+            self._lost_workers[worker_id] = orphans
 
     # ── Thread registry ─────────────────────────────────────────────────────
 
@@ -292,9 +327,13 @@ class InMemoryCoordinator(Coordinator):
             raise ThreadNotFoundError(thread_id)
         adapter = self._workers.get(info.worker_id)
         if adapter is None:
-            # The worker went away but we still have the thread's info.
-            # Treat as not-found.
-            raise ThreadNotFoundError(thread_id)
+            # The thread is registered but its host is gone. Reporting
+            # not-found here would contradict ``list_threads``, which still
+            # answers with this thread; name the loss instead, and carry the
+            # rest of that worker's blast radius so one caught error tells the
+            # caller everything it lost.
+            siblings = [tid for tid in self._lost_workers.get(info.worker_id, ()) if tid != thread_id]
+            raise WorkerLostError(info.worker_id, [thread_id, *siblings])
         return adapter
 
     def submit(
@@ -457,6 +496,12 @@ class InMemoryCoordinator(Coordinator):
         info = self._infos.get(thread_id)
         if info is None:
             return
+        if info.status.is_done:
+            # A terminal status is the end of the thread's life. A late
+            # lifecycle event from a cycle that was already in flight must
+            # not resurrect it as ``idle`` — status only ever moves toward
+            # terminal.
+            return
         new_status: ThreadStatus | None = None
         if event.kind == EventKind.STARTED:
             new_status = ThreadStatus.RUNNING
@@ -468,6 +513,10 @@ class InMemoryCoordinator(Coordinator):
         elif event.kind == EventKind.CANCELLED:
             new_status = ThreadStatus.CANCELLED
         elif event.kind == EventKind.FAILED:
+            # A cycle that raised leaves the thread alive and dequeuing, so a
+            # dispatcher-emitted FAILED means idle. The coordinator writes
+            # ``ThreadStatus.FAILED`` itself when the thread is really dead
+            # (``deregister_worker``), which the terminal guard above protects.
             new_status = ThreadStatus.IDLE
         if new_status is not None and new_status != info.status:
             self._infos[thread_id] = info.model_copy(update={"status": new_status})

@@ -98,6 +98,13 @@ class DistributedError(Exception):
 class WorkerLostError(DistributedError):
     """Worker process crashed or disconnected.
 
+    Raised by every ``Coordinator`` method that must route ``thread_id`` to a
+    worker when the hosting worker is gone. The thread's ``ThreadInfo`` survives
+    the loss with status ``FAILED``, so callers can still read its status and
+    replay its log; only routing fails. Over the wire it reaches the caller as a
+    ``RemoteError`` classified ``"worker_lost"``, because ``worker_id`` and
+    ``thread_ids`` cannot be rebuilt from an ``ErrorFrame``'s message.
+
     Args:
         worker_id: Identifier of the worker that was lost.
         thread_ids: Ids of threads previously hosted on this worker.
