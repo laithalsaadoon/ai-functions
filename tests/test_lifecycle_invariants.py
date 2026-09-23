@@ -28,9 +28,9 @@ import asyncio
 import pytest
 
 from ai_functions import ai_function
-from ai_functions.runtime import EventEmissionError, WorkerLostError
+from ai_functions.runtime import EventEmissionError, InMemoryCoordinator, LocalWorker, WorkerLostError
 from ai_functions.testing import RuntimeHarness, ScriptedModel, Turn
-from ai_functions.types import EventKind, ThreadStatus
+from ai_functions.types import Event, EventKind, ThreadId, ThreadStatus
 from ai_functions.types.events import (
     CompletedEvent,
     FailedEvent,
@@ -303,6 +303,69 @@ async def test_operations_on_an_orphaned_thread_name_the_lost_worker() -> None:
             await h.coordinator.cancel(first.id)
         with pytest.raises(WorkerLostError):
             await h.coordinator.terminate(first.id)
+
+
+async def test_worker_loss_is_fully_recorded_before_failure_callbacks() -> None:
+    """Subscribers see every affected thread failed and the complete loss set."""
+    coordinator = InMemoryCoordinator()
+    async with RuntimeHarness(coordinator=coordinator) as h:
+        first = await h.spawn(_simple.replace(model=ScriptedModel([Turn(text="a")])))
+        second = await h.spawn(_simple.replace(model=ScriptedModel([Turn(text="b")])))
+        thread_ids = {first.id, second.id}
+        observed: list[tuple[ThreadId, dict[ThreadId, ThreadStatus], WorkerLostError]] = []
+
+        def on_failure(event: Event) -> None:
+            assert event.thread_id is not None
+            # Synchronous callbacks cannot await discovery; snapshot the cache
+            # they observe and assert outside append_event's exception isolation.
+            statuses = {
+                tid: coordinator._infos[tid].status  # noqa: SLF001
+                for tid in thread_ids
+            }
+            try:
+                coordinator.submit(event.thread_id, "retry")
+            except WorkerLostError as exc:
+                observed.append((event.thread_id, statuses, exc))
+
+        with coordinator.on(on_failure, kinds=[EventKind.FAILED]):
+            await coordinator.deregister_worker(h.worker.worker_id)
+
+        assert len(observed) == 2
+        assert {tid for tid, _, _ in observed} == thread_ids
+        for tid, statuses, error in observed:
+            assert statuses == dict.fromkeys(thread_ids, ThreadStatus.FAILED)
+            assert error.worker_id == h.worker.worker_id
+            assert error.thread_ids[0] == tid
+            assert set(error.thread_ids) == thread_ids
+
+
+async def test_in_flight_pause_does_not_downgrade_worker_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pause response arriving after worker loss must leave the thread failed."""
+    pause_started = asyncio.Event()
+    release_pause = asyncio.Event()
+    original_pause = LocalWorker.pause
+
+    async def delayed_pause(worker: LocalWorker, thread_id: ThreadId) -> None:
+        await original_pause(worker, thread_id)
+        pause_started.set()
+        await release_pause.wait()
+
+    monkeypatch.setattr(LocalWorker, "pause", delayed_pause)
+    async with RuntimeHarness() as h:
+        handle = await h.spawn(_simple.replace(model=ScriptedModel([Turn(text="ok")])))
+        assert (await handle.run("prompt")).strip() == "ok"
+        pause_task = asyncio.create_task(h.coordinator.pause(handle.id))
+        try:
+            await asyncio.wait_for(pause_started.wait(), timeout=2)
+            await h.coordinator.deregister_worker(h.worker.worker_id)
+            assert await handle.status() is ThreadStatus.FAILED
+
+            release_pause.set()
+            await asyncio.wait_for(pause_task, timeout=2)
+            assert await handle.status() is ThreadStatus.FAILED
+        finally:
+            release_pause.set()
+            await asyncio.gather(pause_task, return_exceptions=True)
 
 
 async def test_deregister_worker_is_idempotent_and_fails_each_thread_once() -> None:

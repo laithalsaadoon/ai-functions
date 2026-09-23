@@ -175,6 +175,14 @@ class InMemoryCoordinator(Coordinator):
             for thread_id, info in self._infos.items()
             if info.worker_id == worker_id and not info.status.is_done
         )
+        # Subscribers run synchronously inside append_event. Record the whole
+        # loss before notifying any of them, so callbacks see terminal statuses
+        # and WorkerLostError carries every affected thread from the first event.
+        if orphans:
+            self._lost_workers[worker_id] = orphans
+        for thread_id in orphans:
+            info = self._infos[thread_id]
+            self._infos[thread_id] = info.model_copy(update={"status": ThreadStatus.FAILED})
         for thread_id in orphans:
             self.append_event(
                 FailedEvent(
@@ -183,11 +191,6 @@ class InMemoryCoordinator(Coordinator):
                     error=f"WorkerLostError: worker {worker_id!r} was lost while hosting thread {thread_id!r}",
                 )
             )
-            info = self._infos.get(thread_id)
-            if info is not None:
-                self._infos[thread_id] = info.model_copy(update={"status": ThreadStatus.FAILED})
-        if orphans:
-            self._lost_workers[worker_id] = orphans
 
     # ── Thread registry ─────────────────────────────────────────────────────
 
@@ -356,6 +359,9 @@ class InMemoryCoordinator(Coordinator):
         adapter = self._adapter_for(thread_id)
         await adapter.pause(thread_id)
         info = self._infos[thread_id]
+        # The worker may have been lost while awaiting the pause response.
+        if info.status.is_done:
+            return
         # Pausing a non-running thread flips it to PAUSED; an in-flight
         # cycle keeps its RUNNING status until it yields at a work
         # boundary, at which point its next lifecycle event governs.
