@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_functions import ai_function
 from ai_functions.testing import RuntimeHarness, ScriptedModel, Turn
@@ -169,18 +169,24 @@ def test_custom_event_routing_fields_are_declared_not_payload() -> None:
     assert ta.validate_python(dumped).thread_id == ThreadId("thr-7")
 
 
-def test_custom_event_shadowing_payload_key_round_trips() -> None:
-    """A payload entry named like a declared field never eats the routing field."""
+@pytest.mark.parametrize("key", ["id", "timestamp", "thread_id", "thread_name", "message_id", "kind", "payload"])
+def test_custom_event_rejects_shadowing_payload_keys(key: str) -> None:
+    """Application data cannot overwrite framework fields when flattened."""
+    with pytest.raises(ValidationError, match=f"conflict.*{key}.*rename or nest"):
+        CustomEvent(kind="my_kind", thread_id=ThreadId("thr-7"), payload={key: "application-value"})
+
+
+def test_custom_event_application_nesting_round_trips() -> None:
+    """Users can retain source field names inside their own nested object."""
     ta: TypeAdapter[Event] = TypeAdapter(Event)
-    event = CustomEvent(kind="my_kind", thread_id=ThreadId("thr-7"), payload={"id": "0", "text": "t"})
+    item = {"id": "item-1", "thread_id": "source-thread", "kind": "source", "payload": {"text": "t"}}
+    event = CustomEvent(kind="my_kind", thread_id=ThreadId("thr-7"), payload={"item": item})
     dumped = ta.dump_python(event)
-    # The shadowing entry is re-nested; the top-level ``id`` is the event's own.
     assert dumped["id"] == event.id
-    assert dumped["payload"] == {"id": "0"}
-    assert dumped["text"] == "t"
-    reparsed = ta.validate_python(dumped)
-    assert reparsed == event
-    assert reparsed.payload == {"id": "0", "text": "t"}
+    assert dumped["thread_id"] == "thr-7"
+    assert dumped["item"] == item
+    assert "payload" not in dumped
+    assert ta.validate_python(dumped) == event
 
 
 def test_custom_event_is_frozen() -> None:

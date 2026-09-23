@@ -6,6 +6,10 @@ ai_functions observes its notification stream and re-emits each element as a
 ai_functions event — pure observability, not a source of truth. The
 implementation module's docstring carries the full Codex-to-event mapping.
 
+Custom plan-item events expose ``item_id`` and ``text``. Opaque SDK
+notification bodies are nested under ``data`` and unmapped items under
+``item``, keeping source field names separate from event routing metadata.
+
 Distinguishing capabilities relative to the Claude and Kiro backends:
 
 - ``fork()`` is real — Codex branches the stored conversation server-side.

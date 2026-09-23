@@ -15,11 +15,14 @@ import asyncio
 from collections.abc import Callable
 
 import pytest
+from pydantic import AliasChoices, AliasPath, BaseModel, Field, ValidationError, create_model
+from pydantic_core import PydanticSerializationError
 
 from ai_functions.network import CoordinatorClient, CoordinatorEndpoint
 from ai_functions.network.channel import EVENT_ADAPTER
 from ai_functions.testing import RuntimeHarness
 from ai_functions.types import CustomEvent, Event, ThreadId
+from ai_functions.types.events import BaseEvent
 from ai_functions.types.ids import MessageId
 
 _TID = ThreadId("thr-custom-wire")
@@ -82,6 +85,78 @@ def test_a3_subclass_declared_fields_round_trip() -> None:
     assert isinstance(via_union, CustomEvent)
     assert via_union.thread_id == _TID
     assert via_union.payload == {"a": 1, "step": "validate"}
+
+
+def test_payload_cannot_shadow_a_subclass_field() -> None:
+    with pytest.raises(ValidationError, match="conflict.*step"):
+        _Annotated(kind="my_kind", step="validate", payload={"step": "overwrite"})
+
+
+@pytest.mark.parametrize("field", list(BaseEvent.model_fields))
+def test_subclass_cannot_redefine_metadata(field: str) -> None:
+    with pytest.raises(TypeError, match=f"cannot redefine BaseEvent fields: {field}"):
+        create_model("InvalidEvent", __base__=CustomEvent, **{field: (str, "application-value")})
+
+
+def test_subclass_cannot_inherit_conflicting_metadata_from_an_application_model() -> None:
+    class ApplicationModel(BaseModel):
+        id: int
+
+    with pytest.raises(TypeError, match="cannot redefine BaseEvent fields: id"):
+
+        class InvalidEvent(ApplicationModel, CustomEvent):
+            pass
+
+
+@pytest.mark.parametrize("reserved", ["id", "thread_id", "kind", "payload"])
+@pytest.mark.parametrize("alias_type", ["alias", "validation_alias", "serialization_alias"])
+def test_subclass_alias_cannot_use_a_framework_name(reserved: str, alias_type: str) -> None:
+    with pytest.raises(TypeError, match="alias conflicting with framework fields"):
+        create_model(
+            "InvalidEvent",
+            __base__=CustomEvent,
+            application_id=(str, Field(**{alias_type: reserved})),
+        )
+
+
+@pytest.mark.parametrize("alias", [AliasChoices("item_id", "id"), AliasPath("thread_id", "value")])
+def test_subclass_validation_alias_cannot_consume_metadata(alias: AliasChoices | AliasPath) -> None:
+    with pytest.raises(TypeError, match="alias conflicting with framework fields"):
+        create_model("InvalidEvent", __base__=CustomEvent, application_id=(str, Field(validation_alias=alias)))
+
+
+def test_alias_generator_cannot_rename_metadata() -> None:
+    with pytest.raises(TypeError, match="alias conflicting with framework fields"):
+
+        class InvalidEvent(CustomEvent):
+            model_config = {"alias_generator": str.upper}
+
+
+def test_application_alias_remains_available_to_pydantic() -> None:
+    class Progress(CustomEvent):
+        completed: int = Field(alias="count")
+
+    event = Progress.model_validate({"kind": "progress", "thread_id": _TID, "count": "3", "unit": "steps"})
+    assert event.completed == 3
+    assert event.payload == {"unit": "steps"}
+    dumped = event.model_dump(by_alias=True)
+    assert dumped["count"] == 3
+    assert dumped["thread_id"] == _TID
+    assert "payload" not in dumped
+    assert Progress.model_validate(dumped) == event
+    with pytest.raises(ValidationError, match="conflict.*count"):
+        Progress(kind="progress", count=3, payload={"count": 4})
+
+
+@pytest.mark.parametrize("copy_update", [False, True])
+def test_serialization_rejects_conflicts_introduced_after_validation(copy_update: bool) -> None:
+    event = CustomEvent(kind="my_kind", thread_id=_TID)
+    if copy_update:
+        event = event.model_copy(update={"payload": {"id": "application-id"}})
+    else:
+        event.payload["id"] = "application-id"
+    with pytest.raises(PydanticSerializationError, match="conflict.*id"):
+        event.model_dump_json()
 
 
 # ── b: the runtime gate stamps the declared field ─────────────────────────
@@ -161,3 +236,25 @@ async def test_c4_unrouted_append_is_recorded_on_append_errors(
             assert "thread_id" in str(client.append_errors[0])
             assert "append_event RPC failed" in caplog.text
             assert await endpoint.coordinator.get_events(_TID) == []
+
+
+async def test_client_append_preserves_user_nesting_without_automatic_nesting() -> None:
+    """One event keeps its flat wire shape through append, broadcast and replay."""
+    async with CoordinatorEndpoint() as endpoint:
+        await endpoint.start(host="127.0.0.1", port=0)
+        async with await CoordinatorClient.connect(endpoint.url) as client:
+            received: list[Event] = []
+            event = CustomEvent(
+                kind="my_kind",
+                thread_id=_TID,
+                payload={"item_id": "item-1", "data": {"id": "source-id", "thread_id": "source-thread"}},
+            )
+            with client.on(received.append, thread_id=_TID):
+                client.append_event(event)
+                await _until(lambda: bool(received))
+            assert received == [event]
+            assert await client.get_events(_TID) == [event]
+            dumped = received[0].model_dump()
+            assert dumped["item_id"] == "item-1"
+            assert dumped["data"] == {"id": "source-id", "thread_id": "source-thread"}
+            assert "payload" not in dumped

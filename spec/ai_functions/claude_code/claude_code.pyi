@@ -37,7 +37,7 @@ emitted by the runtime dispatcher, never by the thread.
   Observability only — does not currently drive ``Coordinator.pause_signal``.
 - ``SystemMessage`` variants (``TaskStartedMessage``, ``TaskProgressMessage``,
   ``TaskNotificationMessage``, ``MirrorErrorMessage``, …):
-  ``CustomEvent(kind=f"claude_system_{subtype}", payload=...)``.
+  ``CustomEvent(kind=f"claude_system_{subtype}", payload={"message": ...})``.
 
 Invariants:
     I2 — every emitted event goes through ``Coordinator.append_event``.

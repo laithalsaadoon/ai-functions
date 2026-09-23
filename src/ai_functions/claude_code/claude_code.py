@@ -39,9 +39,9 @@ emitted by the runtime dispatcher, never by the thread.
   payload=...)`` carrying the new conversation id.
 - ``SystemMessage`` variants (``TaskStartedMessage``, ``TaskProgressMessage``,
   ``TaskNotificationMessage``, ``MirrorErrorMessage``, …):
-  ``CustomEvent(kind=f"claude_system_{subtype}", payload=...)``.
+  ``CustomEvent(kind=f"claude_system_{subtype}", payload={"message": ...})``.
 - Any other member of the SDK's ``Message`` union (it grows across releases):
-  ``CustomEvent(kind="claude_message", payload=...)`` with the dataclass fields
+  ``CustomEvent(kind="claude_message", payload={"message": ...})`` with the dataclass fields
   flattened — unknown messages degrade to observability, never to an error.
 
 Invariants:
@@ -663,14 +663,14 @@ class ClaudeAgentThread(Thread[[str], str]):
             ctx.on_event(
                 CustomEvent(
                     kind=f"claude_system_{message.subtype}",
-                    payload=_system_message_payload(message),
+                    payload={"message": _system_message_payload(message)},
                 ),
             )
             return None
         # The ``Message`` union grows with the SDK; degrade members we don't know
         # to observability rather than raising AttributeError on ``subtype``.
         ctx.on_event(
-            CustomEvent(kind="claude_message", payload=_unknown_message_payload(message)),
+            CustomEvent(kind="claude_message", payload={"message": _unknown_message_payload(message)}),
         )
         return None
 

@@ -6,10 +6,10 @@ fields that apply to that kind.
 
 System events have ``kind`` values drawn from ``EventKind`` (a ``StrEnum``).
 User-defined events use any other string: subclass ``CustomEvent``, set
-``kind`` to a stable application-level identifier, and add whatever fields
-you need. Pydantic routes unknown ``kind`` values to ``CustomEvent`` via a
-custom discriminator function, so the full ``Event`` union round-trips
-across the wire without losing user-defined subclasses.
+``kind`` to a stable application-level identifier, and add application fields
+that do not redefine event metadata. The default ``Event`` union parses
+unknown kinds as generic ``CustomEvent`` instances; consumers that need their
+own subclass apply its model or a union containing it explicitly.
 
 Filtering is uniform for both system and custom events — pass any ``kind``
 string (``EventKind`` member or plain string) to ``Coordinator.on(kinds=...)``
@@ -466,10 +466,16 @@ class CustomEvent(BaseEvent):
 
     A top-level key that names a declared field binds to that field, so
     ``CustomEvent(kind="k", thread_id=tid)`` routes rather than filling
-    ``payload``. An entry inside an explicit ``payload`` keeps its place: the
-    serializer re-nests payload entries whose keys shadow a declared field
-    under a ``"payload"`` key, which stops a payload entry named ``id`` or
-    ``thread_id`` from overwriting the event's own routing on a round trip.
+    ``payload``. Payload entries must not shadow any declared field or field
+    alias, including ``kind`` and ``payload`` itself. Conflicts raise an error;
+    rename application fields (for example, ``item_id``) or nest them under an
+    application key (for example, ``payload={"item": {"id": ...}}``). The wire
+    representation stays flat; the serializer never nests conflicting keys.
+
+    Subclasses may declare typed application fields and specialize ``kind``.
+    They must not redefine ``BaseEvent`` fields or alias application fields
+    onto the routing fields, ``kind``, or ``payload``. These names retain their
+    framework meanings, including when the model is serialized with aliases.
 
     ``BaseEvent`` is frozen, so an instance is immutable; build a routed copy
     with ``model_copy(update={"thread_id": ...})``.

@@ -27,11 +27,13 @@ from openai_codex.generated.v2_all import (  # noqa: E402
     McpToolCallStatus,
     McpToolCallThreadItem,
     MessagePhase,
+    PlanThreadItem,
     ThreadTokenUsage,
     ThreadTokenUsageUpdatedNotification,
     TokenUsageBreakdown,
 )
 from openai_codex.models import Notification, UnknownNotification  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 from ai_functions.codex.codex import (  # noqa: E402
     _RUNTIME_TOKEN_ENV,
@@ -236,13 +238,45 @@ async def test_unknown_notification_becomes_custom_event() -> None:
     thread = _thread()
     state = _TurnState(turn_id="turn-1")
     thread._emit_notification(  # pyright: ignore[reportPrivateUsage]
-        Notification(method="thread/somethingNew", payload=UnknownNotification(params={"x": 1})),
+        Notification(
+            method="thread/somethingNew",
+            payload=UnknownNotification(params={"x": 1, "id": "source-id", "thread_id": "source-thread"}),
+        ),
         rec.ctx(),
         state,
     )
     event = rec.events[0]
     assert event.kind == "codex_thread_somethingNew"
-    assert event.payload == {"x": 1}
+    assert event.payload == {"data": {"x": 1, "id": "source-id", "thread_id": "source-thread"}}
+    assert event.thread_id is None
+    assert event.id != "source-id"
+
+
+def test_plan_item_uses_an_application_id_field() -> None:
+    rec = _Recorder()
+    _thread()._emit_item_completed(
+        PlanThreadItem(type="plan", id="plan-1", text="Do the work"),
+        rec.ctx(),
+        _TurnState(turn_id="turn-1"),
+    )
+    event = rec.events[0]
+    assert event.kind == "codex_plan"
+    assert event.payload == {"item_id": "plan-1", "text": "Do the work"}
+    assert event.id != "plan-1"
+
+
+def test_unmapped_item_keeps_source_fields_under_item() -> None:
+    class FutureItem(BaseModel):
+        type: str = "futureItem"
+        id: str = "item-1"
+        thread_id: str = "source-thread"
+
+    rec = _Recorder()
+    _thread()._emit_item_completed(FutureItem(), rec.ctx(), _TurnState(turn_id="turn-1"))
+    event = rec.events[0]
+    assert event.kind == "codex_item_futureItem"
+    assert event.payload == {"item": {"type": "futureItem", "id": "item-1", "thread_id": "source-thread"}}
+    assert event.thread_id is None
 
 
 def test_runtime_tools_config_injects_url_and_token() -> None:

@@ -41,14 +41,16 @@ emitted by the runtime dispatcher, never by the thread.
   ``input + cache_read + cache_write`` total identity.
 - ``error`` (``ErrorNotification``): ``CustomEvent(kind="codex_error")``.
 - ``turn/plan/updated`` / ``item/plan/delta`` / ``PlanThreadItem``:
-  ``CustomEvent(kind="codex_plan", payload=...)``.
+  ``CustomEvent(kind="codex_plan", payload=...)``. Plan items expose
+  ``item_id`` and ``text``; notification bodies are nested under ``data``.
 - Every other thread item on ``item/completed``:
-  ``CustomEvent(kind=f"codex_item_{item.type}", payload=...)``.
+  ``CustomEvent(kind=f"codex_item_{item.type}", payload={"item": ...})``.
 - ``turn/completed``: terminal. ``failed`` raises ``AIFunctionError`` with
   the turn error's message; ``interrupted`` raises
   ``asyncio.CancelledError``; ``completed`` yields the turn result.
 - Every other notification: ``CustomEvent(kind=f"codex_{method}")`` with
-  ``/`` replaced by ``_``.
+  ``/`` replaced by ``_`` and the SDK body nested under ``data``. SDK field
+  names stay inside these application objects, separate from event metadata.
 
 The turn's string result is the last ``final_answer``-phase agent message,
 falling back to the last message with no phase (mirrors the SDK's own
@@ -832,7 +834,7 @@ class CodexAgentThread(Thread[[str], str]):
         if notification.method == "turn/started":
             return  # the dispatcher owns lifecycle events
         kind = "codex_plan" if "plan" in notification.method else f"codex_{notification.method.replace('/', '_')}"
-        ctx.on_event(CustomEvent(kind=kind, payload=_payload_dict(payload)))
+        ctx.on_event(CustomEvent(kind=kind, payload={"data": _payload_dict(payload)}))
 
     def _emit_item_started(self, item: object, ctx: ThreadContext) -> None:
         """Emit the opening event for one thread item."""
@@ -871,7 +873,7 @@ class CodexAgentThread(Thread[[str], str]):
                     )
             return
         if isinstance(item, PlanThreadItem):
-            ctx.on_event(CustomEvent(kind="codex_plan", payload={"id": item.id, "text": item.text}))
+            ctx.on_event(CustomEvent(kind="codex_plan", payload={"item_id": item.id, "text": item.text}))
             return
         result = _tool_result_for(item)
         if result is not None:
@@ -879,7 +881,7 @@ class CodexAgentThread(Thread[[str], str]):
             return
         item_type = _item_type(item)
         if item_type not in _MAPPED_ITEM_TYPES:
-            ctx.on_event(CustomEvent(kind=f"codex_item_{item_type}", payload=_payload_dict(item)))
+            ctx.on_event(CustomEvent(kind=f"codex_item_{item_type}", payload={"item": _payload_dict(item)}))
 
 
 def _breakdown_to_token_usage(usage: ThreadTokenUsage) -> TokenUsage:

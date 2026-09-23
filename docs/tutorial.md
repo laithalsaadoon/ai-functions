@@ -880,6 +880,40 @@ coord.append_event(CustomEvent(
 ))
 ```
 
+Custom events use the same flat wire format as built-in events: the example's
+`step` and `duration_ms` appear alongside `kind`, `id`, `timestamp`, `thread_id`,
+`thread_name`, and `message_id`. There is no automatic `payload` wrapper in
+the serialized event.
+
+Those framework names, plus the `payload` carrier itself, are reserved.
+Application payload keys must not shadow a declared field or its alias.
+For example, `payload={"id": "source-id"}` raises a validation error; use
+`payload={"item_id": "source-id"}` or explicitly nest source data:
+
+```python
+event = CustomEvent(
+    kind="source_item",
+    thread_id=handle.id,
+    payload={"item": {"id": "source-id", "thread_id": "source-thread"}},
+)
+```
+
+The runtime's `event.id` and `event.thread_id` remain distinct from
+`event.payload["item"]`. Existing saved events whose top-level reserved names
+represented application data need an explicit migration before those fields
+can be interpreted as runtime metadata.
+
+Users can also subclass `CustomEvent` and declare ordinary typed Pydantic
+fields. Subclasses may specialize `kind`, but cannot redefine `BaseEvent`
+fields or alias application fields onto framework names. The default network
+decoder returns generic `CustomEvent` instances for unknown kinds; consumers
+apply their own model when they need typed application data.
+
+The built-in adapters follow this contract: Codex plan items expose
+`item_id` and `text`, opaque Codex notifications use `payload["data"]`, and
+unmapped Codex items use `payload["item"]`. Claude system and unmapped messages
+keep SDK fields under `payload["message"]`.
+
 ## Memory and optimization
 
 Just as PyTorch or JAX let you optimize parameters via backpropagation through a computation graph, AI Functions let you optimize agentic workflows via natural-language feedback propagation. You define named parameters (prompt fragments, learned facts, or reusable Python code) in a *memory schema*, store them in a memory backend, and pass them to your functions as ordinary arguments. After a run, you attach feedback to the output; the library traces that feedback back through the graph of agentic calls that produced it and updates each contributing parameter, so the next run recalls the improved values. Feedback also propagates across child threads: if a thread spawns a child during its execution, the feedback reaches the child and the child's memory.
