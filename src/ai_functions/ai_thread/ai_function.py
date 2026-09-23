@@ -298,16 +298,20 @@ class AIFunction[**P, T](ToolProvider, Spawnable[P, T]):
     async def _spawn_in_context(self) -> ThreadHandle[P, T]:
         """Spawn for a ``__call__`` cycle, reusing the ambient thread scope if set.
 
-        With an active :class:`ThreadScope`, spawn on its coordinator and the
-        caller's worker (looked up from the caller's ``ThreadInfo`` — no
-        cloudpickle) with ``parent_id`` set to the caller. With no scope, defer
-        to :meth:`spawn`'s private-worker path.
+        With an active :class:`ThreadScope` naming a thread, spawn on its
+        coordinator and the caller's worker (looked up from the caller's
+        ``ThreadInfo`` — no cloudpickle) with ``parent_id`` set to the caller.
+        With a coordinator-only scope (:func:`ai_functions.scope`), spawn on
+        that coordinator with no parent. With no scope, defer to
+        :meth:`spawn`'s private-worker path.
         """
         from ..types import current_thread_scope
 
         scope = current_thread_scope()
         if scope is None:
             return await self.spawn()
+        if scope.thread_id is None:
+            return await scope.coordinator.spawn(self)
         caller = await scope.coordinator.get_thread_info(scope.thread_id)
         return await scope.coordinator.spawn(
             self,

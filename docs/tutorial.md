@@ -111,7 +111,7 @@ For plain scripts and quick experiments, every AI Function also provides `run_sy
 result = translate_text.run_sync(text, lang="fr")
 ```
 
-Use whichever fits the context: `run_sync` at the top level of simple scripts, `await` inside async code (and in Jupyter notebooks, where top-level `await` is supported out of the box). The early examples in this tutorial use `run_sync` for brevity; starting from [Parallel workflows](#parallel-workflows), where concurrency is the point, they switch to `await`.
+Use whichever fits the context: `run_sync` at the top level of simple scripts, `await` inside async code (and in Jupyter notebooks, where top-level `await` is supported out of the box). The early examples in this tutorial use `run_sync` for brevity; starting from [Parallel workflows](#parallel-workflows), where concurrency is the point, they switch to `await`. Either form runs the call on a private, throwaway runtime; to watch a call's turns and tool activity live, or replay them afterwards, run it inside `ai_functions.scope()` (see [Observing bare calls](#observing-bare-calls)).
 
 ### Return types
 
@@ -864,6 +864,14 @@ with coord.on(log_event, thread_id=handle.id):
     await handle.run(...)
 ```
 
+For the common case — printing the feed to the terminal — `ai_functions.cli.print_event` is a ready-made subscriber that renders every turn, tool call, and lifecycle transition in the same format the `ai-functions logs` command uses:
+
+```python
+from ai_functions.cli import print_event
+
+coord.on(print_event)
+```
+
 To inspect the stored log after the fact (for replay, for a UI that attaches late, for analysis), `coordinator.get_events(thread_id, ...)` returns the events for a thread in chronological order, with optional filters on `since_id`, `kinds`, and `limit`.
 
 Built-in events cover thread lifecycle (`STARTED`, `COMPLETED`, `FAILED`, `CANCELLED`, `RESULT`), conversation content (`MESSAGE_USER`, `MESSAGE_ASSISTANT_*`), tool activity (`TOOL_CALL`, `TOOL_RESULT`), tool approvals, session management, and token usage (`TOKEN_USAGE`). The full list and the fields carried by each kind are documented in the API reference under `ai_functions.types`.
@@ -920,6 +928,23 @@ The built-in adapters follow this contract: Codex plan items expose
 `item_id` and `text`, opaque Codex notifications use `payload["data"]`, and
 unmapped Codex items use `payload["item"]`. Claude system and unmapped messages
 keep SDK fields under `payload["message"]`.
+
+### Observing bare calls
+
+A bare call — `await my_function(...)` or `run_sync`, with no coordinator in sight — runs on a private coordinator and worker built for that call and dropped when it returns, so there is nothing to subscribe to and no log to replay. `ai_functions.scope()` binds one shared runtime for a block and yields its coordinator; every bare call inside the block runs there:
+
+```python
+import ai_functions
+from ai_functions.cli import print_event
+
+
+async def main() -> None:
+    async with ai_functions.scope(on_event=print_event) as coord:
+        summary = await summarize(text)  # events print live
+    events = await coord.get_events(...)  # and replay after the block
+```
+
+The `on_event=` subscriber is registered before anything runs, so it sees every event from the first spawn on; the full `Coordinator` API (`on`, `get_events`, `list_threads`, `submit`) is available on the yielded object. The worker is torn down when the block exits; the coordinator and its event log survive.
 
 ## Memory and optimization
 

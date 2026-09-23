@@ -1,11 +1,10 @@
 """ai_functions CLI — the ``ai-functions`` command installed by the package.
 
 This subpackage holds the Typer app that powers the ``ai_functions`` console
-script. The public API of the package does NOT re-export CLI internals
-— user code should go through :mod:`ai_functions.discovery` and
-:mod:`ai_functions.runner` instead. The only name exported from this module is
-:func:`main`, which is the entry point referenced from
-``pyproject.toml`` under ``[project.scripts]``.
+script; :func:`main` is the entry point referenced from ``pyproject.toml``
+under ``[project.scripts]``. :func:`print_event` prints the same event feed
+the commands do, as a :meth:`~ai_functions.protocols.Coordinator.on`
+subscriber for scripts.
 
 Command surface (verbs modelled on ``docker`` / ``kubectl``):
 
@@ -31,7 +30,7 @@ Command surface (verbs modelled on ``docker`` / ``kubectl``):
                              ``terminate_now``.
 - ``ai-functions run <script>``   — execute a user script whose module exposes
                              a main :class:`Spawnable` attribute (see
-                             :mod:`ai_functions.cli.run_cmd`).
+                             :func:`ai_functions.cli.commands.run_cmd`).
 
 Every command reads the target coordinator URL from, in order:
 ``--url`` flag, ``AI_FUNCTIONS_COORDINATOR_URL`` env var, the runtime file.
@@ -43,6 +42,10 @@ import sys
 from typing import cast
 
 import click
+
+from .events import print_event
+
+__all__ = ["main", "print_event"]
 
 
 def _usage_error_types() -> tuple[type[click.ClickException], ...]:

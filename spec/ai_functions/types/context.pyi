@@ -53,15 +53,24 @@ class ThreadContext:
 
 @dataclass(frozen=True)
 class ThreadScope:
-    """The ambient ``(coordinator, thread_id)`` of the running thread."""
+    """The ambient ``(coordinator, thread_id)`` of the running thread.
+
+    ``thread_id`` is ``None`` in a coordinator-only scope
+    (:func:`ai_functions.scope`): the coordinator to run on is bound, with no
+    thread to attribute against or parent to.
+    """
 
     coordinator: Coordinator
-    thread_id: ThreadId
+    thread_id: ThreadId | None = None
 
 
 @contextmanager
-def thread_scope(coordinator: Coordinator, thread_id: ThreadId) -> Iterator[ThreadScope]:
-    """Bind the ambient thread to ``(coordinator, thread_id)`` for the duration of a block."""
+def thread_scope(coordinator: Coordinator, thread_id: ThreadId | None = None) -> Iterator[ThreadScope]:
+    """Bind the ambient thread to ``(coordinator, thread_id)`` for the duration of a block.
+
+    Omitting ``thread_id`` binds the coordinator alone: bare AI-function calls
+    in the block run on it, with no thread to parent them to.
+    """
 
 
 def current_thread_scope() -> ThreadScope | None:

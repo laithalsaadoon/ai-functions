@@ -1,15 +1,13 @@
 """Shared event-formatter used by ``ai-functions logs`` and ``ai-functions attach``.
 
-The logic originated in ``examples/integrate_claude_code.py`` — the pretty-
-printer that turns :class:`~ai_functions.types.Event` instances into one-line
-console output. Factored into the package so the CLI commands and the
-TUI share it.
+The pretty-printer that turns :class:`~ai_functions.types.Event` instances
+into one-line console output, shared by the CLI commands, the TUI, and — via
+:func:`print_event` — coordinator subscribers in user scripts.
 
 Output is a ``rich`` :class:`~rich.console.RenderableType` so both the
 plain-stdout logger (``ai-functions logs``) and the Textual ``RichLog`` widget
 (``ai-functions attach``) consume it without double-formatting. Callers that
-need plain text can ``str(Console().render(renderable))`` or pass
-``markup=False``.
+need plain text use :func:`format_event_plain`.
 """
 
 from __future__ import annotations
@@ -135,7 +133,7 @@ def filter_events_full(event: Event) -> bool:
     return isinstance(event, MessageUserEvent | MessageAssistantCompleteEvent | ToolCallEvent | ToolResultEvent)
 
 
-def format_event(event: Event, *, markup: bool = True) -> RenderableType:
+def format_event(event: Event) -> RenderableType:
     """Render one ai-functions event as a one-line Rich renderable.
 
     The renderable is typically a :class:`~rich.text.Text` instance;
@@ -146,16 +144,12 @@ def format_event(event: Event, *, markup: bool = True) -> RenderableType:
 
     Args:
         event: Any :class:`~ai_functions.types.Event` subclass.
-        markup: When ``True`` (default), the returned renderable
-            includes ANSI colours / bold attributes. Pass ``False`` for
-            log-file output where colours would produce escape noise.
 
     Returns:
         A Rich renderable that prints on a single line when measured
         against an infinite-width console (multi-line content such as
         long assistant messages is truncated with an ellipsis).
     """
-    del markup  # colour is baked into Text styles; strip via console render.
     match event:
         case StartedEvent(thread_name=name):
             return Text(f"  ▶ {name or 'thread'} started", style="green")
@@ -238,10 +232,11 @@ def format_event_full(event: Event) -> RenderableType:
 
 
 def format_event_plain(event: Event) -> str:
-    """Plain-text convenience wrapper for ``ai-functions logs`` without ``--color``.
+    """Render one event as a single line of plain, ANSI-free text.
 
-    Equivalent to rendering :func:`format_event` with ``markup=False``
-    through a Rich console and stripping trailing whitespace.
+    Equivalent to rendering :func:`format_event` through a colourless Rich
+    console and stripping trailing whitespace — the form to hand to a logger
+    or write to a file, where escapes would be noise.
 
     Args:
         event: Event to format.
@@ -253,11 +248,34 @@ def format_event_plain(event: Event) -> str:
     """
     if not filter_events(event):
         return ""
-    renderable = format_event(event, markup=False)
+    renderable = format_event(event)
     console = Console(file=None, color_system=None, force_terminal=False, width=1000)
     with console.capture() as capture:
         console.print(renderable, end="")
     return capture.get().rstrip()
+
+
+_STDOUT_CONSOLE = Console()
+
+
+def print_event(event: Event) -> None:
+    """Print one event to standard output in the CLI's event-feed format.
+
+    A ready-made subscriber for
+    :meth:`~ai_functions.protocols.Coordinator.on`::
+
+        coordinator.on(print_event)
+
+    Events that :func:`filter_events` excludes — the streaming token and
+    thinking chunks, whose content is repeated in full by the assistant
+    turn that closes them — print nothing. Colour follows Rich's stdout
+    detection: escapes on a terminal, plain text elsewhere.
+
+    Args:
+        event: The event to print.
+    """
+    if filter_events(event):
+        _STDOUT_CONSOLE.print(format_event(event))
 
 
 def _truncate(text: str, limit: int) -> str:

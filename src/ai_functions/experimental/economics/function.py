@@ -644,6 +644,8 @@ class EconomicFunction[**P, T]:
         scope = current_thread_scope()
         if scope is None:
             return await self.spawn()
+        if scope.thread_id is None:
+            return await scope.coordinator.spawn(self)
         caller = await scope.coordinator.get_thread_info(scope.thread_id)
         return await scope.coordinator.spawn(self, worker_id=caller.worker_id, parent_id=scope.thread_id)
 

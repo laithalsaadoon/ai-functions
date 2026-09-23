@@ -66,10 +66,15 @@ class ThreadScope:
     replaces and restores the ambient value but records no link to the one it
     shadowed; thread parent/child structure is recovered from the event log by
     ``build_graph``, not from a scope chain.
+
+    ``thread_id`` is ``None`` in a coordinator-only scope
+    (:func:`ai_functions.scope`): the coordinator to run on is bound, with no
+    thread to attribute against or parent to. Readers that need a thread behave
+    as they do outside any scope.
     """
 
     coordinator: Coordinator
-    thread_id: ThreadId
+    thread_id: ThreadId | None = None
 
 
 _thread_scope: contextvars.ContextVar[ThreadScope | None] = contextvars.ContextVar(
@@ -79,7 +84,7 @@ _thread_scope: contextvars.ContextVar[ThreadScope | None] = contextvars.ContextV
 
 
 @contextmanager
-def thread_scope(coordinator: Coordinator, thread_id: ThreadId) -> Iterator[ThreadScope]:
+def thread_scope(coordinator: Coordinator, thread_id: ThreadId | None = None) -> Iterator[ThreadScope]:
     """Bind the ambient thread to ``(coordinator, thread_id)`` for the duration of a block.
 
     Within the block, code that reads :func:`current_thread_scope` — e.g. a
@@ -90,6 +95,11 @@ def thread_scope(coordinator: Coordinator, thread_id: ThreadId) -> Iterator[Thre
 
         with thread_scope(coord, handle.id):
             guidelines = await memory.recall("joke_guidelines")
+
+    Omitting ``thread_id`` binds the coordinator alone: bare AI-function calls
+    in the block run on it, with no thread to parent them to.
+    :func:`ai_functions.scope` wraps this form with the coordinator and worker
+    lifecycle.
 
     Explicit ``recall(coordinator=..., thread_id=...)`` arguments override the
     ambient scope.

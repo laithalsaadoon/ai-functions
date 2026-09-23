@@ -24,6 +24,7 @@ from .runtime import (
     LocalWorker,
     WorkerAdapter,
 )
+from .scope import scope
 from .serve import aserve, serve
 from .session import FileSessionStore, SessionData, SessionStore
 from .types import ParameterView, Result, Traceable
@@ -54,6 +55,7 @@ __all__ = [
     "Result",
     "run_blocking",
     "RuntimeInfo",
+    "scope",
     "serve",
     "SessionData",
     "SessionStore",
