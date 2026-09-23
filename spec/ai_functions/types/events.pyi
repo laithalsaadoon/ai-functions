@@ -25,7 +25,7 @@ import enum
 import time
 from typing import Annotated, Literal, TypeGuard
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 from strands.types.content import ContentBlock
 from strands.types.tools import ToolResultContent, ToolResultStatus
 
@@ -505,7 +505,7 @@ SystemEvent = Annotated[
     Field(discriminator="kind")
 ]
 
-Event = Annotated[SystemEvent | CustomEvent, Field(union_mode="left_to_right")]
+Event = Annotated[SystemEvent | SerializeAsAny[CustomEvent], Field(union_mode="left_to_right")]
 """Tagged union of every built-in event variant plus the ``CustomEvent`` fallback.
 
 Pydantic tries union members left-to-right: the discriminated ``SystemEvent``
@@ -523,6 +523,12 @@ outscore the concrete variant a built-in kind belongs to and swallow it.
 
 Users can write their own union to add correct parsing of their own
 event types.
+
+``SerializeAsAny`` makes the custom branch serialize the concrete model's fields
+and serializers, including inside ``Event``-typed fields and containers. RPC
+parameters and session logs inherit this policy without per-call flags. Input
+validation still uses the declared union: a peer that does not know the subclass
+receives a generic ``CustomEvent`` with application fields collected in ``payload``.
 """
 
 

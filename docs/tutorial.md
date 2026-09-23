@@ -909,6 +909,13 @@ fields or alias application fields onto framework names. The default network
 decoder returns generic `CustomEvent` instances for unknown kinds; consumers
 apply their own model when they need typed application data.
 
+Use the shared `Event` type for event fields and containers in Pydantic models.
+Its serialization policy preserves fields declared by custom subclasses through
+RPC parameters, lists, and session logs, while honoring their serializers and
+excluded fields. Generic receivers collect the serialized application fields
+into `payload`; consumers can reconstruct their subclass with
+`MyEvent.model_validate(received.model_dump())`.
+
 The built-in adapters follow this contract: Codex plan items expose
 `item_id` and `text`, opaque Codex notifications use `payload["data"]`, and
 unmapped Codex items use `payload["item"]`. Claude system and unmapped messages

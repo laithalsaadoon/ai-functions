@@ -15,7 +15,7 @@ import pytest
 
 from ai_functions import FileSessionStore, SessionData, SessionStore, ai_function
 from ai_functions.runtime import InMemoryCoordinator, LocalWorker
-from ai_functions.types import StartedEvent, ThreadId
+from ai_functions.types import CustomEvent, StartedEvent, ThreadId
 
 
 def test_filesessionstore_satisfies_protocol(tmp_path: Path) -> None:
@@ -61,6 +61,31 @@ def test_save_then_load_roundtrip(tmp_path: Path) -> None:
     assert isinstance(data.threads["agent"][0], StartedEvent)
     assert data.thread_ids == {"agent": tid}
     assert data.metadata == {"cc_session": "xyz"}
+
+
+def test_save_load_preserves_custom_subclass_fields(tmp_path: Path) -> None:
+    """Generic session serialization retains data declared on user subclasses."""
+
+    class Progress(CustomEvent):
+        completed: int
+
+    store = FileSessionStore(tmp_path)
+    tid = ThreadId("t-progress")
+    started = StartedEvent(thread_id=tid)
+    original = Progress(kind="progress", thread_id=tid, completed=3, payload={"source": {"id": "item-1"}})
+    store.save("custom", {"agent": [started, original]}, {"agent": tid})
+    restored = store.load("custom")
+    assert restored.threads["agent"][0] == started
+    event = restored.threads["agent"][1]
+    assert type(event) is CustomEvent
+    assert event.id == original.id
+    assert event.thread_id == tid
+    assert event.payload == {"completed": 3, "source": {"id": "item-1"}}
+    assert Progress.model_validate(event.model_dump()) == original
+
+    # A peer that only knows generic CustomEvent can save the log again intact.
+    store.save("custom-copy", restored.threads, restored.thread_ids)
+    assert store.load("custom-copy").threads == restored.threads
 
 
 def test_save_without_metadata(tmp_path: Path) -> None:

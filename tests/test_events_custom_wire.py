@@ -15,14 +15,14 @@ import asyncio
 from collections.abc import Callable
 
 import pytest
-from pydantic import AliasChoices, AliasPath, BaseModel, Field, ValidationError, create_model
+from pydantic import AliasChoices, AliasPath, BaseModel, Field, ValidationError, create_model, field_serializer
 from pydantic_core import PydanticSerializationError
 
 from ai_functions.network import CoordinatorClient, CoordinatorEndpoint
 from ai_functions.network.channel import EVENT_ADAPTER
 from ai_functions.testing import RuntimeHarness
 from ai_functions.types import CustomEvent, Event, ThreadId
-from ai_functions.types.events import BaseEvent
+from ai_functions.types.events import BaseEvent, StartedEvent
 from ai_functions.types.ids import MessageId
 
 _TID = ThreadId("thr-custom-wire")
@@ -81,10 +81,62 @@ def test_a3_subclass_declared_fields_round_trip() -> None:
     assert dumped.payload == {"a": 1}
     # Through the ``Event`` union the subclass degrades to ``CustomEvent``;
     # ``step`` is an undeclared key there, so it lands in the payload.
-    via_union = EVENT_ADAPTER.validate_python(original.model_dump())
+    via_union = EVENT_ADAPTER.validate_json(EVENT_ADAPTER.dump_json(original))
     assert isinstance(via_union, CustomEvent)
     assert via_union.thread_id == _TID
     assert via_union.payload == {"a": 1, "step": "validate"}
+    assert _Annotated.model_validate(via_union.model_dump()) == original
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_event_annotation_preserves_subclass_fields_in_containers(json_mode: bool) -> None:
+    """Any Event-typed slot inherits the serialization policy without flags."""
+
+    class Envelope(BaseModel):
+        event: Event
+        events: list[Event]
+        batches: dict[str, list[Event]]
+
+    original = _Annotated(kind="progress", thread_id=_TID, step="validate", payload={"completed": 3})
+    started = StartedEvent(thread_id=_TID)
+    envelope = Envelope(event=original, events=[started, original], batches={"batch": [original]})
+    restored = (
+        Envelope.model_validate_json(envelope.model_dump_json())
+        if json_mode
+        else Envelope.model_validate(envelope.model_dump())
+    )
+    assert restored.events[0] == started
+    assert isinstance(restored.events[0], StartedEvent)
+    for event in (restored.event, restored.events[1], restored.batches["batch"][0]):
+        assert type(event) is CustomEvent
+        assert event.id == original.id
+        assert event.thread_id == _TID
+        assert event.payload == {"completed": 3, "step": "validate"}
+        assert _Annotated.model_validate(event.model_dump()) == original
+
+
+def test_event_annotation_respects_custom_serializers_and_excluded_fields() -> None:
+    class Progress(CustomEvent):
+        completed: int
+        local_only: str = Field(default="not-on-wire", exclude=True)
+
+        @field_serializer("completed")
+        def _format_completed(self, value: int) -> str:
+            return f"{value} steps"
+
+    original = Progress(kind="progress", thread_id=_TID, completed=3)
+    dumped = EVENT_ADAPTER.dump_python(original, mode="json")
+    assert dumped["completed"] == "3 steps"
+    assert "local_only" not in dumped
+    assert "payload" not in dumped
+    restored = EVENT_ADAPTER.validate_python(dumped)
+    assert type(restored) is CustomEvent
+    assert restored.payload == {"completed": "3 steps"}
+
+
+def test_event_annotation_still_validates_metadata() -> None:
+    with pytest.raises(ValidationError, match="timestamp"):
+        EVENT_ADAPTER.validate_python({"kind": "progress", "timestamp": "invalid", "completed": 3})
 
 
 def test_payload_cannot_shadow_a_subclass_field() -> None:
@@ -149,14 +201,18 @@ def test_application_alias_remains_available_to_pydantic() -> None:
 
 
 @pytest.mark.parametrize("copy_update", [False, True])
-def test_serialization_rejects_conflicts_introduced_after_validation(copy_update: bool) -> None:
+@pytest.mark.parametrize("use_adapter", [False, True])
+def test_serialization_rejects_conflicts_introduced_after_validation(copy_update: bool, use_adapter: bool) -> None:
     event = CustomEvent(kind="my_kind", thread_id=_TID)
     if copy_update:
         event = event.model_copy(update={"payload": {"id": "application-id"}})
     else:
         event.payload["id"] = "application-id"
     with pytest.raises(PydanticSerializationError, match="conflict.*id"):
-        event.model_dump_json()
+        if use_adapter:
+            EVENT_ADAPTER.dump_json(event)
+        else:
+            event.model_dump_json()
 
 
 # ── b: the runtime gate stamps the declared field ─────────────────────────
@@ -238,23 +294,27 @@ async def test_c4_unrouted_append_is_recorded_on_append_errors(
             assert await endpoint.coordinator.get_events(_TID) == []
 
 
-async def test_client_append_preserves_user_nesting_without_automatic_nesting() -> None:
-    """One event keeps its flat wire shape through append, broadcast and replay."""
+async def test_client_append_preserves_subclass_fields_and_user_nesting() -> None:
+    """A subclass keeps its fields through the RPC, broadcast and replay paths."""
     async with CoordinatorEndpoint() as endpoint:
         await endpoint.start(host="127.0.0.1", port=0)
         async with await CoordinatorClient.connect(endpoint.url) as client:
             received: list[Event] = []
-            event = CustomEvent(
+            event = _Annotated(
                 kind="my_kind",
                 thread_id=_TID,
+                step="validate",
                 payload={"item_id": "item-1", "data": {"id": "source-id", "thread_id": "source-thread"}},
             )
             with client.on(received.append, thread_id=_TID):
                 client.append_event(event)
                 await _until(lambda: bool(received))
-            assert received == [event]
-            assert await client.get_events(_TID) == [event]
+            expected = CustomEvent.model_validate(event.model_dump())
+            assert received == [expected]
+            assert await client.get_events(_TID) == [expected]
             dumped = received[0].model_dump()
+            assert _Annotated.model_validate(dumped) == event
+            assert dumped["step"] == "validate"
             assert dumped["item_id"] == "item-1"
             assert dumped["data"] == {"id": "source-id", "thread_id": "source-thread"}
             assert "payload" not in dumped
