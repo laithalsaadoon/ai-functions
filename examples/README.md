@@ -60,6 +60,7 @@ Lean automatically; see [Verified](#verified) for native compilation setup.
 | Keep state, resume a session, or host cooperating agents     | [Threads](#threads) |
 | Remember information and improve results from feedback       | [Memory](#memory) |
 | Choose models according to cost and expected success         | [Economics](#economics) |
+| Give an object AI methods and hand them to other agents      | [Methods](#methods) |
 | Use Claude Code or Kiro as a thread                          | [Integrations](#integrations) |
 | Verify the agent's work or compile a verified implementation | [Verified](#verified) |
 | Explore a larger learning loop or benchmark                  | [Projects](#projects) |
@@ -154,6 +155,17 @@ Sample tasks are included, and the workflow uses a canned search tool.
 
 The workflow persists its learned state in `forecast_memory.json` in the working
 directory.
+
+## Methods
+
+Write a class whose methods are AI functions over the object's own state, hand
+those methods to other agents as typed tools, and check a method's proposals
+with a gate. See [the methods guide](../docs/methods.md).
+
+| Example | What it teaches | Run |
+| --- | --- | --- |
+| [Analyst team](methods/analyst_team.py) | Call a method once, hand every method to an orchestrator as a typed tool, and keep one method on a live thread. | `uv run methods/analyst_team.py` |
+| [Gated proposer](methods/gated_proposer.py) | Check each proposal against a policy cap, retry with the gate's report, and filter one-shot proposals from forked threads. | `uv run methods/gated_proposer.py` |
 
 ## Integrations
 

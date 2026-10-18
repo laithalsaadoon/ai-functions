@@ -249,6 +249,37 @@ def report_writer(topic: str) -> str:
     """Research the following topic and write a report: {topic}"""
 ```
 
+### Method agents
+
+The `ai_functions.experimental.methods` module applies the same decorator to methods. Each `@ai_method` on a `MethodAgent` is a typed AI Function whose docstring can read the object's state through `self`, and `agents()` hands every method to another agent as a typed tool (see `examples/methods/analyst_team.py`):
+
+```python
+from ai_functions.experimental.methods import MethodAgent, ai_method
+
+
+class Analyst(MethodAgent):
+    def __init__(self, notes: str) -> None:
+        self.notes = notes
+
+    # Other agents see this method as the `analyst_causes` tool.
+    @ai_method(Finding, description="Name the likely causes of a symptom")
+    def causes(self, symptom: str, max_causes: int = 2) -> Finding:
+        """Using only these notes, name at most {max_causes} likely causes of {symptom}:
+
+        {self.notes}
+        """
+
+
+analyst = Analyst(notes)
+
+
+@ai_function(tools=analyst.agents())
+def postmortem(incident: str) -> str:
+    """Write a short postmortem for this incident, using the analyst's tools: {incident}"""
+```
+
+A method can also run on a live thread whose calls share history, have its proposals checked by a gate that runs as its post-condition, or read memory that the optimizer can update. See the [methods documentation](docs/methods.md) for details.
+
 ## Stateful AI Threads
 
 When the same conversation should be reused across several calls, a function can be spawned into a stateful **AI Thread**. The handle returned by `spawn()` refers to a live thread on which every `run` accumulates history:
