@@ -58,9 +58,9 @@ finding = await analyst.compiled("causes")(symptom="errors on /pay", max_causes=
 
 `@ai_method` takes the output type first, then any `ThreadConfig` field that `@ai_function` accepts, such as `description`, `name`, `post_conditions`, `max_attempts`, `tools` or `model`. The decorator records these settings and returns the method unchanged, so inheritance and `super()` work as usual. `ai_methods()` lists the decorated methods on a class, including those on base classes.
 
-The docstring is the prompt template. It's rendered with `self` and the call's bound arguments, with defaults filled in, so `{self.notes}` and `{max_causes}` both work. If the method body returns a string, that string is the prompt and the docstring is skipped. A method whose body returns `None` and that has no docstring raises `RenderError` when it's called.
+The docstring is the prompt template. It's rendered with `self` and the call's bound arguments, with defaults filled in, so `{self.notes}` and `{max_causes}` both work, and it renders exactly as an `@ai_function` docstring does. If the method body returns a string or a t-string, that is the prompt and the docstring is skipped. A method whose body returns `None` and that has no docstring raises `RenderError` when it's called.
 
-`compiled(name)` builds an ordinary `AIFunction` for one method. Awaiting it runs one call on a fresh thread, and `trace`, `replace` and `render_prompt` work as they do on any AI Function. Keyword arguments to `compiled` override the decorator's settings. Keys that aren't `ThreadConfig` fields, such as `hooks=`, go to the Strands `Agent`, the same way `AIFunction.replace` handles them. If your module uses `from __future__ import annotations`, define output types at module level, because the method's annotations are resolved against the module's globals.
+`compiled(name)` builds an ordinary `AIFunction` for one method. Awaiting it runs one call on a fresh thread, and `trace`, `replace` and `render_prompt` work as they do on any AI Function. Keyword arguments to `compiled` override the decorator's settings, as `AIFunction.replace` applies them, so keys that aren't `ThreadConfig` fields, such as `hooks=`, go to the Strands `Agent`. If your module uses `from __future__ import annotations`, define the types of the method's parameters at module level, because those annotations are resolved against the module's globals.
 
 ## Choosing the model
 
@@ -96,7 +96,7 @@ def postmortem(incident: str) -> str:
 
 `agents()` returns one compiled `AIFunction` per `@ai_method`, and an AI Function given as a tool keeps its own signature. The calling agent sees each method's parameters with their types, defaults and `Literal` choices. The object's state stays on the object. Keyword arguments to `agents()` apply to every method.
 
-Each tool is named `{owner}_{method}`, so the analyst's `causes` method becomes the `analyst_causes` tool. The owner is the agent's `name` attribute, which you can set on the class or on an instance. When it's unset, the owner is the class name in lowercase. `@ai_method(..., name=...)` replaces the whole tool name. Bedrock and the Strands tool-use check accept only letters, digits, `_` and `-` in a tool name, so a name you choose should use only those characters.
+Each tool is named `{owner}_{method}`, so the analyst's `causes` method becomes the `analyst_causes` tool. The owner is the agent's `name` attribute, which you can set on the class or on an instance. When it's unset, the owner is the class name in lowercase. `name=`, given to `@ai_method` or to `compiled`, replaces the whole tool name. The compiled `AIFunction`, its threads and its errors all use the same name. Bedrock and the Strands tool-use check accept only letters, digits, `_` and `-` in a tool name, so a name you choose should use only those characters.
 
 ## Live threads: `spawn()`
 
@@ -116,7 +116,7 @@ await thread.retire()
 
 `run` takes the method's own arguments, so a wrong keyword raises `TypeError`. You always pass the coordinator, so the thread joins your registry and event log. Pass `parent_id=` to attach it to a parent thread. A thread hosts one method, so an agent with three live methods has three threads. To give one method another's context, spawn it with `seed_from=other.id`, which copies the other thread's history into the new one. `seed_events=` and `thread_id=` resume a thread saved by a `SessionStore`, as they do for any AI Function thread.
 
-`MethodThread` also has `notify(text)`, which adds a message to the history without starting a cycle, `fork()`, which branches the conversation, and `handle`, the underlying `ThreadHandle`. `retire()` tears the thread down. It's safe to call twice, or after something else has already ended the thread. After `retire()`, every other operation raises `RetiredThreadError` with the method's name.
+`MethodThread` also has `notify(text)`, which adds a message to the history without starting a cycle, `fork()`, which branches the conversation, and `handle`, the underlying `ThreadHandle`. `retire()` tears the thread down. It's safe to call twice, or after something else has already ended the thread, and if the teardown itself fails, the thread stays live so you can retry. After `retire()`, every other operation raises `RetiredThreadError` with the method's name.
 
 ## Gated proposals: `GatedProposer`
 
@@ -166,7 +166,7 @@ print(offer.rejected)  # every verdict the gate turned away, in order
 
 A gate is any callable that takes a candidate and returns a `Verdict`. A verdict is any object with an `ok` property and a `report_text()` method. `Gate` and `Verdict` are protocols, so any type with these members fits, including types you already have. `candidate_of` picks the part of the response the gate judges, and it returns the whole response by default.
 
-`gated(method="propose")` compiles the method with the gate attached. The gate goes first in `post_conditions`, and any `post_conditions=` you pass run after it. When the gate rejects a proposal, it raises `GateRejectionError` with the report followed by `REASK`. The model reads that message on its next attempt, and the verdict is added to `rejected`. If the gate itself raises, or returns a verdict that can't be read, you get `GateFaultError`. Its message says the gate broke, and nothing is added to `rejected`. `gated()` raises `WiringError` before any model call when a post-condition's first parameter has the same name as one of the method's parameters, because the runtime would pass that argument twice. This path needs a synchronous gate. `admits` raises `GateFaultError` when the gate returns an awaitable. An async gate works with `judge` and `propose_k`.
+`gated(method="propose")` compiles the method with the gate attached. The gate goes first in `post_conditions`, then the method's own `post_conditions`, then any `post_conditions=` you pass. When the gate rejects a proposal, it raises `GateRejectionError` with the report followed by `REASK`. The model reads that message on its next attempt, and the verdict is added to `rejected`. If the gate itself raises, or returns a verdict that can't be read, the call ends with `GateFaultError` instead of retrying. Its message says the gate broke, and nothing is added to `rejected`. `GateFaultError` is a `PostConditionError`, the core error a post-condition raises to end the call rather than send feedback to the model. `gated()` raises `WiringError` before any model call when a post-condition's first parameter has the same name as one of the method's parameters, because the runtime would pass that argument twice. This path needs a synchronous gate, so `gated()` also raises `WiringError` for an async gate. An async gate works with `judge` and `propose_k`.
 
 ### Several proposals at once: `propose_k`
 
@@ -174,7 +174,7 @@ A gate is any callable that takes a candidate and returns a `Verdict`. A verdict
 admitted = await offer.propose_k(3, coord, case=case)  # [(percent, verdict), ...] for each admitted branch
 ```
 
-`propose_k(k, coordinator, ...)` spawns one thread for the method, forks it into `k` branches, and asks each branch for one proposal. Each proposal goes straight to the gate with no retries. The call returns the admitted `(candidate, verdict)` pairs in branch order and adds the rest to `rejected`. `seed=[{...}, ...]` runs cycles on the first thread before it's forked, so every branch starts from that history. Every branch is retired when `propose_k` returns or raises.
+`propose_k(k, coordinator, ...)` spawns one thread for the method, forks it into `k` branches, and asks each branch for one proposal. Each proposal goes straight to the gate with no retries, and the method's own `post_conditions` don't run on the branches. The call returns the admitted `(candidate, verdict)` pairs in branch order and adds the rest to `rejected`. `seed=[{...}, ...]` runs cycles on the first thread before it's forked, so every branch starts from that history. Every branch is retired when `propose_k` returns or raises. The method's other arguments are passed by keyword, so a method with a parameter named `method` or `seed` can't be beamed and raises `WiringError`.
 
 The branches are sibling threads on your coordinator. `propose_k` spawns them without the coordinator's `list_threads` and `send_message` tools, so a branch can't find or message its siblings, and each proposal is an independent draw. The method's own `tools=` still reach every branch.
 
@@ -220,7 +220,7 @@ await TextGradOptimizer().step(result, "The choice ignored the missing document.
 
 `Recall(agent, backend).trace(method, ...)` fetches each marked parameter fresh, passes it to the method as a keyword argument, and traces the call. It returns the same `Result` that `AIFunction.trace` does, ready for `optimizer.step`. After a search, the optimizer applies its feedback to the entries that call retrieved. See [Memory and optimization](tutorial.md#memory-and-optimization) for how the graph and the optimizer work.
 
-The marked parameter stays in the tool schema, so a peer agent that calls the method as a tool supplies the value itself. A value you pass to `trace` by keyword is used as is, and nothing is retrieved for it. `trace` raises `RecallWiringError` before any retrieval or model call when a search has no query, a query names a parameter that won't be retrieved, a positional argument would land on a marked parameter, or the method has a parameter named `queries` or `overrides`.
+The marked parameter stays in the tool schema, so a peer agent that calls the method as a tool supplies the value itself. A value you pass to `trace` by keyword is used as is, and nothing is retrieved for it. `trace` raises `RecallWiringError` before any retrieval or model call when a search has no query, a query names a parameter that won't be retrieved, a positional argument would land on a marked parameter, or the method has a parameter named `queries` or `overrides`. It raises `CompilationError`, also before any retrieval, when the method isn't an `@ai_method`.
 
 ## Errors
 
@@ -228,12 +228,12 @@ Every error in the module subclasses `MethodError`, an `AIFunctionError` whose `
 
 | Error                | Raised when                                                                          |
 |----------------------|--------------------------------------------------------------------------------------|
-| `CompilationError`   | `compiled` gets a name that isn't an `@ai_method`                                    |
+| `CompilationError`   | `compiled` or `Recall.trace` gets a name that isn't an `@ai_method`                  |
 | `RenderError`        | a method has no docstring and its body returns `None`                                |
 | `RetiredThreadError` | a `MethodThread` is used after `retire()`                                            |
 | `GateRejectionError` | the gate turns a proposal away; the message is the model's retry prompt              |
 | `GateFaultError`     | the gate, `candidate_of`, or the verdict raises, or `admits` gets an awaitable       |
-| `WiringError`        | a post-condition would receive an argument twice, or `propose_k` gets `k` below 1    |
+| `WiringError`        | a post-condition would get an argument twice, or a gate or beam can't be wired       |
 | `RecallMarkerError`  | a `Recalled` marker has `k` below 1, or one annotation carries two different markers |
 | `RecallWiringError`  | a `Recall.trace` call can't be wired, as listed above                                |
 

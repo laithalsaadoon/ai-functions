@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from pydantic import BaseModel, Field
 
 from ..types import MessageUserEvent, ThreadContext
-from .errors import AIFunctionError
+from .errors import AIFunctionError, PostConditionError
 
 
 class PostConditionResult(BaseModel):
@@ -57,7 +57,8 @@ Return values:
 - ``PostConditionResult(passed=True)`` / ``None`` — condition passed.
 - ``PostConditionResult(passed=False, message=...)`` — condition failed.
 - Raising an exception — treated as a failed condition whose message is
-  the exception text.
+  the exception text, except :class:`PostConditionError`, which ends the
+  cycle with that error.
 """
 
 
@@ -69,7 +70,8 @@ async def evaluate_post_conditions(
 
     A condition returning ``None``/``passed`` passes; ``passed=False``
     contributes its message; a raised exception is treated as failure with
-    the exception text. Callers here take a single string prompt, so there
+    the exception text, except a :class:`PostConditionError`, which
+    propagates. Callers here take a single string prompt, so there
     are no bound keyword arguments to offer condition callables.
 
     Args:
@@ -78,6 +80,9 @@ async def evaluate_post_conditions(
 
     Returns:
         Failure messages; empty when all conditions pass.
+
+    Raises:
+        PostConditionError: A condition raised it.
     """
 
     async def _run_one(cond: PostCondition) -> str | None:
@@ -85,7 +90,9 @@ async def evaluate_post_conditions(
             cond_result = cond(result)
             if asyncio.iscoroutine(cond_result):
                 cond_result = await cond_result
-        except Exception as exc:  # noqa: BLE001 - any failure is a failed condition
+        except PostConditionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any other failure is a failed condition
             return str(exc)
         if cond_result is None or cond_result.passed:
             return None

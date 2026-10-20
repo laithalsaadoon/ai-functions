@@ -212,3 +212,14 @@ async def test_none_result_counts_as_pass() -> None:
 
     errors = await evaluate_post_conditions("x", (silent,))
     assert errors == []
+
+
+async def test_post_condition_error_propagates() -> None:
+    """A ``PostConditionError`` is not a failure message: it propagates to the caller."""
+    from ai_functions.ai_thread.errors import PostConditionError
+
+    def broken(result: str) -> PostConditionResult:
+        raise PostConditionError("the checker is unavailable")
+
+    with pytest.raises(PostConditionError, match="the checker is unavailable"):
+        await evaluate_post_conditions("anything", (broken,))

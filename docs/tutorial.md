@@ -229,7 +229,7 @@ def summarize_meeting(transcripts: str) -> MeetingSummary:
     """
 ```
 
-All post-conditions are checked in parallel. The agent receives a single message reporting all errors and can address all of them at the same time, reducing the number of iterations necessary to converge to a correct output. The number of retries is bounded by `max_attempts` on the decorator (default 10).
+All post-conditions are checked in parallel. The agent receives a single message reporting all errors and can address all of them at the same time, reducing the number of iterations necessary to converge to a correct output. The number of retries is bounded by `max_attempts` on the decorator (default 10). A post-condition that cannot evaluate the result at all, for example because a checker it depends on is down, can raise `PostConditionError` (from `ai_functions.ai_thread`) to end the call with that error instead of sending feedback to the agent.
 
 Post-conditions are not limited to checking the answer of the agent. They can more generally enforce invariants about the state of the system after the agent's execution, and they can consume one of the original input arguments by naming it in their signature. The example below implements a coding agent that verifies the correctness of its implementation before moving on to new tasks:
 

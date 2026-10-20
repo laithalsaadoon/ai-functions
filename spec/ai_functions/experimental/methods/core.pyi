@@ -4,17 +4,15 @@ The decorator records an :class:`AIMethodSpec` on a method; an instance
 compiles it into an ``AIFunction`` whose ``prompt_fn`` is the bound method's
 typed signature over that instance's state; ``MethodAgent`` collects the
 compiled capabilities as typed tools and puts one on a live thread as a
-``MethodThread``. Nothing here subclasses a core type: ``AIFunction`` is
-constructed with a generated ``prompt_fn``, and the thread is the runtime's
-own ``ThreadHandle`` wrapped once.
+``MethodThread``, which wraps the runtime's ``ThreadHandle``.
 
 Invariants:
-    M1 to M7 as declared in the package docstring
-    (:mod:`ai_functions.experimental.methods`); this module is the sole
-    implementation of each. M1 and M2 live in :func:`compile_ai_method`, M3 in
-    :func:`compile_ai_method` and :meth:`MethodAgent.spawn`, M4 in the
-    generated ``prompt_fn``, M5 in :meth:`MethodAgent.spawn`, M6 and M7 in
-    :class:`MethodThread`, M8 in :meth:`MethodAgent.compiled`.
+    M1 to M9 as declared in the package docstring
+    (:mod:`ai_functions.experimental.methods`). M1 and M2 live in
+    :func:`compile_ai_method`, M3 in :func:`compile_ai_method` and
+    :meth:`MethodAgent.spawn`, M4 in the generated ``prompt_fn``, M5 and M9 in
+    :meth:`MethodAgent.spawn`, M6 and M7 in :class:`MethodThread`, M8 in
+    :meth:`MethodAgent.compiled`.
 """
 
 from __future__ import annotations
@@ -69,8 +67,8 @@ def ai_method(output_type: type[Any], /, **config: Any) -> Callable[[Callable[..
     """Mark a method as an AI function whose prompt is its docstring.
 
     The method body is normally empty: returning ``None`` hands the docstring to
-    the template renderer, exactly as the library's own decorator does. Return a
-    string instead to compute the prompt directly and skip templating (M4).
+    the template renderer, as with ``@ai_function``. Return a string or a
+    t-string ``Template`` instead to compute the prompt directly (M4).
 
     Args:
         output_type: The structured type the agent must produce.
@@ -96,24 +94,24 @@ def is_ai_method(value: object) -> bool:
     """
     ...
 
-def compile_ai_method(instance: object, name: str, **overrides: Any) -> AIFunction[..., Any]:
+def compile_ai_method(instance: object, name: str, /, **overrides: Any) -> AIFunction[..., Any]:
     """Compile one ``@ai_method`` on ``instance`` into an ``AIFunction``.
 
     The generated ``prompt_fn`` carries the *bound* method's signature, so the
-    typed parameters reach the model and ``self`` does not (M1). Rendering
-    happens here rather than through the library's docstring path because that
-    path builds its context from bound arguments alone, which would leave
-    ``{self.plane}`` undefined (M4).
+    typed parameters reach the model and ``self`` does not (M1). It returns the
+    docstring as a template with ``self`` and the bound arguments in scope, so a
+    template can read ``{self.plane}``, and ``AIFunction`` renders it as it
+    renders an ``@ai_function`` docstring (M4).
 
     Args:
         instance: The object whose state the method closes over.
         name: The attribute name of an ``@ai_method`` on ``type(instance)``.
-        overrides: ``ThreadConfig`` fields applied over the decorator's config;
-            ``model=`` is how a test scripts a capability offline.
+        overrides: ``ThreadConfig`` fields applied over the decorator's config,
+            as :meth:`AIFunction.replace` applies them.
 
     Returns:
-        An ``AIFunction`` whose tool name is ``{owner}_{name}`` unless the
-        decorator or ``overrides`` set ``name`` (M3).
+        An ``AIFunction`` named ``{owner}_{name}`` unless the decorator or
+        ``overrides`` set ``name`` (M3).
 
     Raises:
         CompilationError: ``name`` is not an ``@ai_method`` on the instance's class.
@@ -130,14 +128,15 @@ class MethodThread:
     ``run(problem="collatz")`` and the second cycle's model context contains the
     first cycle's turns.
 
-    A runtime thread wraps exactly one ``Spawnable``, so an agent with three
-    ``@ai_method`` s has three threads; ``spawn(..., seed_from=other.id)`` is
-    the deliberate cross-method handoff. History is never kept on ``self``
-    (M7): the coordinator's event log is the single source of truth. A
-    method with typed parameters compiles to ``STRUCTURED`` and no peer's
-    ``send_message`` reaches it; a method whose only parameter is a ``str``
-    compiles to ``STR_PROMPT`` and one can, so a team gives none of its
-    threads ``send_message`` at all. ``notify()`` is the inbound side channel.
+    A runtime thread wraps one ``Spawnable``, so each ``@ai_method`` runs on its
+    own thread; ``spawn(..., seed_from=other.id)`` starts one capability's
+    thread from another's history. History is the coordinator's event log
+    (M7). The runtime's ``send_message`` reaches a thread whose input shape is
+    ``STR_PROMPT``: a method with typed parameters compiles to ``STRUCTURED``
+    and is not reachable that way, while a method whose only parameter is a
+    ``str`` compiles to ``STR_PROMPT`` and is. ``notify()`` appends to the
+    thread's log without starting a cycle, so the next ``run`` sees it as
+    context.
 
     Args:
         agent: The ``MethodAgent`` whose method this thread runs.
@@ -179,10 +178,8 @@ class MethodThread:
     def qualified_name(self) -> str:
         """The name the compiled tool is published under (M3).
 
-        Usually ``{owner}_{method}``, but an ``@ai_method(..., name=...)`` rename
-        wins, because an error message must name a thread the caller can
-        actually find in the tool schema it was reading. ``spawn`` passes the
-        compiled name in.
+        Usually ``{owner}_{method}``; an ``@ai_method(..., name=...)`` rename
+        wins. ``spawn`` passes the compiled name in.
         """
         ...
 
@@ -220,6 +217,9 @@ class MethodThread:
     async def fork(self, *, parent_id: ThreadId | None = None) -> MethodThread:
         """Branch into a second thread over a copy of this history.
 
+        The fork starts from a copy of this thread's log and diverges from
+        there; this thread is unaffected.
+
         Args:
             parent_id: Passes through untouched, so the library's default holds:
                 the fork is attributed to *this thread's* parent, making it a
@@ -239,7 +239,8 @@ class MethodThread:
 
         Idempotent against this object and against the runtime: retiring twice
         is not an error, and neither is retiring a thread something else already
-        tore down (``ThreadNotFoundError`` is suppressed).
+        tore down (``ThreadNotFoundError`` is suppressed). A teardown that raises
+        anything else leaves the thread live, so ``retire`` can be retried.
         """
         ...
 
@@ -251,8 +252,7 @@ class MethodAgent:
     """An object whose ``@ai_method`` s are typed AI functions over its own state.
 
     Every compiled method is an ``AIFunction``, which is a ``ToolProvider``, so
-    one agent hands another a *typed* tool per capability rather than a chat
-    box, and ``agents(...)`` collects them for exactly that purpose.
+    ``agents(...)`` hands another agent one typed tool per capability.
 
     Two ways to invoke a capability. ``compiled(name)`` is the stateless one:
     await it and one throwaway thread runs one cycle. ``spawn(name, coordinator)``
@@ -284,26 +284,24 @@ class MethodAgent:
         """
         ...
 
-    def compiled(self, name: str, **overrides: Any) -> AIFunction[..., Any]:
+    def compiled(self, name: str, /, **overrides: Any) -> AIFunction[..., Any]:
         """Compile one ``@ai_method`` into a stateless ``AIFunction``.
 
         Args:
             name: Which ``@ai_method`` to compile.
             overrides: ``ThreadConfig`` overrides applied over the decorator's
                 config; ``model=`` here wins over the decorator and
-                :attr:`model` (M8). Any key that is not a
-                ``ThreadConfig`` field (``hooks=``, ``callback_handler=``, ...)
-                is a ``strands.Agent`` kwarg merged into ``agent_kwargs``, as
+                :attr:`model` (M8), and ``name=`` renames the published tool
+                (M3). Any key that is not a ``ThreadConfig`` field
+                (``hooks=``, ``callback_handler=``, ...) is a ``strands.Agent``
+                kwarg merged into ``agent_kwargs``, as
                 :meth:`AIFunction.replace` does.
 
         Returns:
             The compiled function; awaiting it runs one throwaway cycle.
 
         Raises:
-            CompilationError: ``name`` is not an ``@ai_method``, or the method
-                has parameters and the compiled function lost them (M1 checked
-                from the other side: a typed method must never compile to
-                ``NO_ARGS``).
+            CompilationError: ``name`` is not an ``@ai_method``.
         """
         ...
 
@@ -321,6 +319,7 @@ class MethodAgent:
     async def spawn(
         self,
         name: str,
+        /,
         coordinator: Coordinator,
         *,
         parent_id: ThreadId | None = None,
@@ -333,21 +332,23 @@ class MethodAgent:
         """Put one ``@ai_method`` on a live thread and return its lifecycle handle.
 
         Args:
-            name: Which ``@ai_method`` to spawn; each gets its own thread.
-            coordinator: The coordinator to spawn onto: always the caller's,
-                never an implicit one (M5).
+            name: Which ``@ai_method`` to spawn. One agent may hold several live
+                at once, each on its own thread.
+            coordinator: The coordinator to spawn onto; the thread joins its
+                registry and event log (M5).
             parent_id: Parent thread to attribute this one to.
             seed_from: Another thread's id whose history this thread starts
-                from: the sanctioned cross-method handoff.
+                from, such as another capability's thread on this agent.
+            seed_events: A persisted event log to rehydrate this thread from,
+                as a ``SessionStore`` returns it; at most one of ``seed_from``
+                and ``seed_events`` (M9).
+            thread_id: The id to resume under; ``None`` mints a fresh id (M9).
             thread_name: Display name in the event log. Defaults to the compiled
                 tool name (M3).
             overrides: ``ThreadConfig`` overrides, exactly as :meth:`compiled`
-                takes them; ``name`` is unreachable from here.
-
-        Compiles through ``self.compiled`` so a scripted ``compiled`` bound on
-        the instance reaches every live thread.
+                takes them.
 
         Returns:
-            A :class:`MethodThread`, not cached on ``self``.
+            A new :class:`MethodThread`; the agent keeps no reference to it.
         """
         ...

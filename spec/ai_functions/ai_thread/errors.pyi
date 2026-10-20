@@ -30,3 +30,11 @@ class ValidationError(AIFunctionError):
     validation_errors: dict[str, str]
 
     def __init__(self, function_name: str, errors: dict[str, str]) -> None: ...
+
+
+class PostConditionError(AIFunctionError):
+    """A post-condition could not evaluate the result.
+
+    Raised from a post-condition, it ends the cycle with this error instead of
+    becoming validation feedback for the model's next attempt.
+    """

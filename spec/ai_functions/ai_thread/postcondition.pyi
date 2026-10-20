@@ -55,7 +55,8 @@ Return values:
 - ``PostConditionResult(passed=True)`` / ``None`` — condition passed.
 - ``PostConditionResult(passed=False, message=...)`` — condition failed.
 - Raising an exception — treated as a failed condition whose message is
-  the exception text.
+  the exception text, except :class:`PostConditionError`, which ends the
+  cycle with that error.
 """
 
 async def evaluate_post_conditions(
@@ -66,7 +67,8 @@ async def evaluate_post_conditions(
 
     A condition returning ``None``/``passed`` passes; ``passed=False``
     contributes its message; a raised exception is treated as failure with
-    the exception text. Callers here take a single string prompt, so there
+    the exception text, except a :class:`PostConditionError`, which
+    propagates. Callers here take a single string prompt, so there
     are no bound keyword arguments to offer condition callables.
 
     Args:
@@ -75,6 +77,9 @@ async def evaluate_post_conditions(
 
     Returns:
         Failure messages; empty when all conditions pass.
+
+    Raises:
+        PostConditionError: A condition raised it.
     """
     ...
 

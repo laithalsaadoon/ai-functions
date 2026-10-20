@@ -37,10 +37,12 @@ def _merge_config(
     """Return ``base`` with ``kwargs`` merged into it.
 
     ``ThreadKwargs`` fields replace the base field directly; unknown keys are
-    treated as ``strands.Agent`` kwargs and merged into ``base.agent_kwargs``.
+    treated as ``strands.Agent`` kwargs and merged into ``agent_kwargs``,
+    which is ``base.agent_kwargs`` unless ``kwargs`` replaces it.
     """
     thread_kwargs, agent_kwargs = split_config_and_agent_kwargs(**kwargs)
-    combined: dict[str, Any] = {**base.agent_kwargs, **agent_kwargs}  # pyright: ignore[reportExplicitAny]
+    base_agent = thread_kwargs.pop("agent_kwargs", base.agent_kwargs)
+    combined: dict[str, Any] = {**base_agent, **agent_kwargs}  # pyright: ignore[reportExplicitAny]
     merged_agent = AgentKwargs(**combined)  # type: ignore[typeddict-item]  # dynamic dict merge
     return dataclasses.replace(
         base,

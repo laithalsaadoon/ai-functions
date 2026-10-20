@@ -1,42 +1,54 @@
 """``Recalled`` + ``Recall``: memory as a call argument, declared on the signature.
 
-A learning loop that retrieves guidance per decision and hands it to ``trace`` as
-a handle follows four rules whose violation is silent: recall freshly per call,
-pass the view whole, never interpolate, never stash it on ``self``. This module
-turns all four into a mechanism. The injection happens at the trace boundary
-and nowhere else, because ``collect_nodes((args, kwargs))`` runs inside
-``AIFunction.trace``: the argument list of the traced call is the one place a
-recalled value can enter and still be a gradient target. The marker declares
-and the binder performs, so the parameter stays in the tool schema for a peer
-that supplies it by hand. Nothing is cached, not the view (single-use emission)
-and not the compiled function (compiled per trace through the instance).
+``Annotated[list[str], Recalled("guidance", k=2)]`` on an ``@ai_method``
+parameter declares that the parameter is filled from memory;
+``Recall(agent, backend).trace(...)`` retrieves it fresh on every call and
+passes the ``ParameterView`` to ``AIFunction.trace`` as a keyword argument.
+``collect_nodes((args, kwargs))`` runs inside ``AIFunction.trace``, so the view
+becomes a parameter node that ``TextGradOptimizer`` can update. A view the
+method creates in its body, renders into its docstring or reads from ``self``
+is not a call argument and is not discovered.
+
+The marked parameter stays in the tool schema, so a peer agent calling the
+capability as a typed tool supplies the value itself.
+
+    class Navigator(MethodAgent):
+        @ai_method(Choice, description="Choose the next transition")
+        def choose(self, advice: Annotated[list[str], Recalled("guidance", k=2)],
+                   state: str) -> Choice:
+            '''Guidance so far: {advice}
+
+            You are in {state}. Choose.
+            '''
+
+``await Recall(navigator, store).trace("choose", state="S", queries={"advice": "S"})``
+searches ``guidance`` for the two entries about this decision, injects the view
+as ``advice``, and returns the ``Result`` whose ``inputs[0].meta["results"]``
+names the entries the decision actually read.
 
 Invariants:
     R1 — the marker declares, the binder performs. ``Recalled`` inside
     ``Annotated`` says which memory field a parameter comes from and how
     (``k=None`` whole, ``k=<int>`` searched); the parameter stays in the tool
-    schema, so a peer can still supply it by hand. The marker is a plain
-    frozen dataclass, never a ``pydantic.Field``, so the installed strands tool
-    decorator accepts it.
+    schema, so a peer can still supply it by hand. The marker is a frozen
+    dataclass, which the strands tool decorator accepts inside ``Annotated``.
 
     R2 — every recalled value enters the traced call as a keyword argument,
     so ``collect_nodes((args, kwargs))`` inside ``AIFunction.trace`` finds the
     ``ParameterView`` and it becomes a gradient target. Nothing on ``self``,
     neither the binder's nor the agent's, ever holds a ``ParameterView``.
 
-    R3 — nothing is cached: not the view (single-use emission; a second trace
-    yields a fresh node) and not the compiled function (``compiled`` is
-    called through the instance per trace, so an instance-level scripted
-    binding reaches every traced call).
+    R3 — nothing is cached: every ``trace`` retrieves a fresh view (a view
+    emits once, so a second trace yields a fresh node) and compiles the method
+    through the agent's ``compiled``.
 
-    R4 — explicit beats implicit: a marked parameter the caller supplied by
-    keyword passes through untouched and triggers no retrieval; a query for it
-    is refused as dead.
+    R4 — a marked parameter the caller supplied by keyword passes through
+    untouched and triggers no retrieval; a query for it is refused as dead.
 
     R5 — every guard fires before any retrieval and before any model call:
     a reserved-name collision or a positional-only marked parameter at
-    ``bound``, a positional shadow or a query mismatch at ``trace``. A
-    search-mode parameter has no default query.
+    ``bound``, a positional shadow, a query mismatch or a method that does not
+    compile at ``trace``. A search-mode parameter has no default query.
 
     R6 — retrieval runs under ``no_thread_scope`` so emission is deferred to
     ``AIFunction.trace`` and the recall event lands on the traced thread, even
@@ -76,11 +88,11 @@ class Recalled:
 
     ``k=None`` recalls the parameter whole (``backend.recall``, derivation
     ``"full"``); ``k=<int>`` searches it (``backend.search``, derivation
-    ``"search"``), which narrows the prompt and the gradient because its meta
-    names the entries the forward pass retrieved. ``source`` is the backend's
-    field path and need not match the Python parameter name. A plain frozen
-    dataclass rather than a ``pydantic.Field`` (R1), so the installed strands
-    tool decorator accepts the marked parameter through ``load_tools``.
+    ``"search"``), whose meta names the entries the forward pass retrieved so
+    consolidation edits only those. ``source`` is the backend's field path and
+    need not match the Python parameter name. The strands tool decorator
+    ignores this marker inside ``Annotated``, so a marked parameter can be
+    offered through ``load_tools`` (R1).
 
     Args:
         source: The memory field the parameter is filled from.
@@ -102,10 +114,10 @@ class Recalled:
 def recalled_params(method: Callable[..., Any]) -> dict[str, Recalled]:
     """The marked parameters of a method, in signature order.
 
-    Takes the *bound* method, whose hints already exclude ``self``. Looks
-    through unions, so ``Traceable[Annotated[T, Recalled(...)]]`` is found.
-    ``get_type_hints`` is allowed to raise: an unresolvable annotation is a
-    wiring bug and reads as one rather than as "unmarked" (R7).
+    Takes the *bound* method, whose hints exclude ``self``. Looks through
+    unions, so ``Traceable[Annotated[T, Recalled(...)]]`` is found. An
+    annotation ``get_type_hints`` cannot resolve raises rather than reading as
+    unmarked (R7).
 
     Args:
         method: A bound ``@ai_method`` (or any callable with resolvable hints).
@@ -122,12 +134,13 @@ def recalled_params(method: Callable[..., Any]) -> dict[str, Recalled]:
 class Recall:
     """Binds one ``MethodAgent`` to one ``MemoryBackend`` and fills its marked parameters per call.
 
-    One binder, one backend: two stores means two binders over the same agent.
-    Positional ``*args`` are forwarded verbatim; injected parameters go in by
-    keyword; ``queries`` maps parameter name to query string; ``overrides`` is
-    ``compiled``'s override mapping. Retrieval errors are not fault-wrapped
-    (R7). The binder holds the agent and the backend and nothing that resembles
-    state (R2, R3).
+    Every marker's ``source`` is a field path on this one backend; an agent
+    that reads from two stores uses two binders. Positional ``*args`` are
+    forwarded verbatim; injected parameters go in by keyword; ``queries`` maps
+    parameter name to query string; ``overrides`` is passed to ``compiled``
+    for the call. A backend exception during retrieval propagates unchanged
+    (R7). The binder holds the agent and the backend and nothing that
+    resembles state (R2, R3).
 
     Args:
         agent: The ``MethodAgent`` whose ``@ai_method`` s carry ``Recalled`` markers.
@@ -140,7 +153,7 @@ class Recall:
     def __init__(self, agent: MethodAgent, backend: MemoryBackend) -> None: ...
     @property
     def agent(self) -> MethodAgent:
-        """The bound agent. Read-only, so the introspected markers keep describing the agent being called."""
+        """The bound agent; read-only."""
         ...
 
     @property
@@ -175,13 +188,13 @@ class Recall:
     ) -> Result[Any]:
         """Retrieve every marked parameter the caller did not supply, then trace the method.
 
-        Queries are validated first, then each marked parameter is fetched
-        fresh under ``no_thread_scope`` and injected as a keyword argument, then
-        the method is compiled through the instance's own ``compiled`` and
-        traced, where ``collect_nodes`` finds the views (R2). A parameter the
-        caller supplied explicitly passes through untouched (R4). ``method`` is
-        positional-only so a bound parameter of that name forwards through
-        ``**kwargs``.
+        Queries are validated and the method compiled through the agent's
+        ``compiled`` first, then each marked parameter is fetched fresh under
+        ``no_thread_scope`` and injected as a keyword argument, then the method
+        is traced, where ``collect_nodes`` finds the views (R2). A parameter the caller
+        supplied explicitly passes through untouched (R4). ``method`` is
+        positional-only, so a method parameter named ``method`` forwards
+        through ``**kwargs``.
 
         Args:
             method: Which ``@ai_method`` to trace.
@@ -200,6 +213,7 @@ class Recall:
 
         Raises:
             RecallWiringError: A guard refused the call before any retrieval (R5).
+            CompilationError: ``method`` is not an ``@ai_method``, before any retrieval.
         """
         ...
 

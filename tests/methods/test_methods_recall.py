@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from ai_functions import JSONMemoryBackend, MemoryBackend
 from ai_functions.experimental.methods import (
+    CompilationError,
     MethodAgent,
     MethodError,
     Recall,
@@ -205,6 +206,15 @@ class MethodNavigator(MethodAgent):
     ) -> Choice:
         """Guidance: {advice}. Method: {method}. Choose."""
         ...
+
+
+class PlainHelper(MethodAgent):
+    """A marked parameter on a method that is not an ``@ai_method``."""
+
+    name = "helper"
+
+    def plain(self, advice: Annotated[list[str], Recalled("guidance", k=2)], state: str) -> str:
+        return state
 
 
 def store(schema: type[BaseModel] = Playbook) -> JSONMemoryBackend:
@@ -463,6 +473,18 @@ async def test_an_unmarked_method_traces_with_no_retrieval_at_all() -> None:
             assert result.value.transition == "T0"
             assert memory.calls == []
             assert result.inputs == []
+        finally:
+            memory.close()
+
+
+async def test_a_method_that_does_not_compile_is_refused_before_any_retrieval() -> None:
+    """R5: compilation is checked before retrieval, so a non-``@ai_method`` costs no backend call."""
+    async with RuntimeHarness():
+        memory = SpyBackend()
+        try:
+            with pytest.raises(CompilationError, match=r"PlainHelper\.plain is not an @ai_method"):
+                await Recall(PlainHelper(), memory).trace("plain", state="S", queries={"advice": "q"})
+            assert memory.calls == []
         finally:
             memory.close()
 

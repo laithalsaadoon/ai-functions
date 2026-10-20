@@ -1,6 +1,6 @@
 """Offline tests for ``@ai_method``: typed contracts, templating, composition, threads.
 
-Twenty-three tests over the decorator's own surface, plus the invariant guards: M2 (markers survive
+Tests over the decorator's own surface, plus the invariant guards: M2 (markers survive
 ``include_extras``), the ``CompilationError`` / ``RenderError`` / ``RetiredThreadError`` leaves, and
 the ``name=`` rename. Every claim the decorator paradigm makes is checked against the schema the model
 would actually see, not against our own bookkeeping; thread-lifecycle claims are asserted from what
@@ -15,12 +15,15 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import typing
 from typing import Any
 
+import cloudpickle  # pyright: ignore[reportMissingTypeStubs]
 import pytest
+from tstr import Interpolation, Template
 
-from ai_functions import JSONMemoryBackend, Procedural
+from ai_functions import JSONMemoryBackend, Procedural, ai_function
 from ai_functions.experimental import methods as methods_pkg
 from ai_functions.experimental.methods import (
     AIMethodSpec,
@@ -43,6 +46,9 @@ from ai_functions.types import InputShape
 from ai_functions.types.graph import ParameterView, collect_nodes
 
 from .methods_wire import Answer, Capturing, Caseworker, MixedWorker, Solver, Tips, logged, scripted
+
+if typing.TYPE_CHECKING:
+    from collections import OrderedDict
 
 # ── Fixtures this file adds beyond the shared ones ──
 
@@ -82,6 +88,71 @@ class Computing(MethodAgent):
     def direct(self, q: str) -> Any:
         """Never rendered: {q}."""
         return f"computed for {q}"
+
+
+class Noted(MethodAgent):
+    """The same prompt three ways: a docstring, a returned ``Template``, and an unsupported return."""
+
+    name = "noted"
+
+    def __init__(self, header: str) -> None:
+        self.header = header
+
+    @ai_method(Answer, description="A docstring prompt with a multi-line value")
+    def from_docstring(self, notes: str) -> Answer:
+        """{self.header}:
+            {notes}
+        Done."""
+        ...
+
+    @ai_method(Answer, description="The same prompt, returned as a t-string")
+    def from_template(self, notes: str) -> Any:
+        # A t-string on Python 3.14+; spelled with the constructor so the module parses on 3.12.
+        return Template(Interpolation(self.header, "self.header"), ":\n    ", Interpolation(notes, "notes"), "\nDone.")
+
+    @ai_method(Answer, description="Returns something that is not a prompt")
+    def from_number(self, notes: str) -> Any:
+        return 42
+
+
+class KeywordOnly(MethodAgent):
+    name = "kwonly"
+
+    @ai_method(Answer, description="Answer a question passed by keyword")
+    def ask(self, *, question: str) -> Answer:
+        """Answer {question}."""
+        ...
+
+
+class TypeCheckingReturn(MethodAgent):
+    """A return annotation that names a ``TYPE_CHECKING``-only import; ``@ai_method`` names the output type."""
+
+    name = "tcreturn"
+
+    @ai_method(Answer, description="Answer a question")
+    def ask(self, question: str) -> OrderedDict[str, str]:
+        """Answer {question}."""
+        ...
+
+
+_UNPICKLABLE = threading.Lock()
+"""A module global cloudpickle cannot serialize, beside an agent that must still ship to a remote worker."""
+
+
+class Shippable(MethodAgent):
+    name = "shippable"
+
+    @ai_method(Answer, description="Answer a question")
+    def ask(self, question: str) -> Answer:
+        """Answer {question}."""
+        ...
+
+
+@ai_function[str]
+def _plain(header: str, notes: str) -> None:
+    """{header}:
+        {notes}
+    Done."""
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -177,21 +248,19 @@ class TestTypedContract:
         assert info.value.function_name == "solver-terse___init__"
         assert isinstance(info.value, MethodError)
 
-    def test_compiled_refuses_a_method_whose_parameters_were_lost(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``compiled`` checks M1 from the other side: a typed method that compiles to ``NO_ARGS`` is refused rather
-        than handed to a caller as a tool with an empty schema."""
-        from ai_functions import AIFunction
-        from ai_functions.ai_thread.config import ThreadConfig
+    async def test_a_keyword_only_method_compiles_with_its_parameters(self) -> None:
+        """A method whose parameters are all keyword-only compiles and keeps them in its tool schema."""
+        fn = KeywordOnly().compiled("ask")
+        assert list(inspect.signature(fn.prompt_fn).parameters) == ["question"]
+        schema = (await fn.load_tools())[0].tool_spec["inputSchema"]["json"]
+        assert schema["required"] == ["question"]
+        assert await fn.render_prompt(question="why") == "Answer why."
 
-        def lossy(instance: object, name: str, **overrides: Any) -> AIFunction[..., Any]:
-            async def prompt_fn() -> str:
-                return "no parameters"
-
-            return AIFunction(prompt_fn, Answer, ThreadConfig(name=f"{instance.name}_{name}"))  # type: ignore[attr-defined]
-
-        monkeypatch.setattr(methods_core, "compile_ai_method", lossy)
-        with pytest.raises(CompilationError, match="solve lost its parameters"):
-            Solver("terse").compiled("solve")
+    async def test_a_type_checking_only_return_annotation_does_not_block_compilation(self) -> None:
+        """Only parameter annotations are resolved; the output type comes from ``@ai_method``."""
+        fn = TypeCheckingReturn().compiled("ask")
+        assert fn.output_type is Answer
+        assert await fn.render_prompt(question="why") == "Answer why."
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -628,3 +697,69 @@ def test_all_is_sorted_and_names_the_public_surface() -> None:
 
 
 _ABSENT = object()
+
+
+# ══════════════════════════════════════════════════════════════════
+# Rendering, naming and shipping match a plain ``@ai_function``
+# ══════════════════════════════════════════════════════════════════
+
+
+async def test_a_docstring_and_a_returned_template_render_as_an_ai_function_docstring() -> None:
+    """M4: multi-line values indent to their placeholder's column, exactly as ``@ai_function`` renders them."""
+    expected = await _plain.render_prompt(header="Notes", notes="a\nb")
+    assert expected == "Notes:\n    a\n    b\nDone."
+    noted = Noted("Notes")
+    assert await noted.compiled("from_docstring").render_prompt(notes="a\nb") == expected
+    assert await noted.compiled("from_template").render_prompt(notes="a\nb") == expected
+
+
+async def test_a_body_returning_neither_str_nor_template_is_refused() -> None:
+    from ai_functions.ai_thread import AIFunctionError
+
+    with pytest.raises(AIFunctionError, match="must return str, Template, or None, got int"):
+        await Noted("Notes").compiled("from_number").render_prompt(notes="x")
+
+
+async def test_the_compiled_function_and_its_threads_carry_the_published_name() -> None:
+    """M3: the ``AIFunction``'s own name is the published one, so logs and runtime errors use it too."""
+    fn = Solver("terse").compiled("solve")
+    assert fn.name == fn.config.name == "solver-terse_solve"
+    async with RuntimeHarness() as h:
+        thread = await Solver("terse").spawn("solve", h.coordinator, model=Capturing(1))
+        forked = await thread.fork()
+        assert (await h.coordinator.get_thread_info(forked.id)).thread_name == "solver-terse_solve"
+        await forked.retire()
+        await thread.retire()
+
+
+def test_compiled_takes_a_name_override() -> None:
+    """M3: ``name=`` renames the published tool per call, as it does on the decorator."""
+    fn = Solver("terse").compiled("solve", name="solver_v2")
+    assert fn.name == fn.config.name == "solver_v2"
+
+
+def test_a_compiled_method_pickles_beside_an_unpicklable_module_global() -> None:
+    """A compiled method ships to a remote worker without serializing its module's globals."""
+    fn = cloudpickle.loads(cloudpickle.dumps(Shippable().compiled("ask")))
+    assert fn.name == "shippable_ask"
+
+
+async def test_a_retire_whose_teardown_fails_leaves_the_thread_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M6: a failed teardown is not a retirement, so the caller can retry it."""
+    from ai_functions.handle import ThreadHandle
+
+    async with RuntimeHarness() as h:
+        thread = await Solver("terse").spawn("solve", h.coordinator, model=Capturing(1))
+        original = ThreadHandle.terminate_now
+
+        async def unreachable(self: ThreadHandle[..., Any]) -> None:
+            raise ConnectionError("worker unreachable")
+
+        monkeypatch.setattr(ThreadHandle, "terminate_now", unreachable)
+        with pytest.raises(ConnectionError, match="worker unreachable"):
+            await thread.retire()
+        assert thread.live is True
+
+        monkeypatch.setattr(ThreadHandle, "terminate_now", original)
+        await thread.retire()
+        assert thread.live is False

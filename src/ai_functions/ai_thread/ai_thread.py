@@ -50,7 +50,7 @@ from .code_execution import (
     detect_procedural_params,
 )
 from .config import CodeExecutionMode, ThreadConfig, ThreadKwargs
-from .errors import AIFunctionError
+from .errors import AIFunctionError, PostConditionError
 from .postcondition import PostCondition
 from .summarization import (
     ContextFitter,
@@ -1007,7 +1007,8 @@ class AIThread[**P, T](Thread):  # type: ignore[type-arg]
 
         Returns the list of all error messages from failed conditions.
         If a condition raises an exception, it is considered failed and
-        the exception text is used as error message.
+        the exception text is used as error message; a
+        :class:`PostConditionError` propagates instead.
 
         Args:
             result: The candidate typed result.
@@ -1030,6 +1031,8 @@ class AIThread[**P, T](Thread):  # type: ignore[type-arg]
                 cond_result = cond(result, **extra)
                 if asyncio.iscoroutine(cond_result):
                     cond_result = await cond_result
+            except PostConditionError:
+                raise
             except Exception as exc:
                 return str(exc)
             if cond_result is None or cond_result.passed:

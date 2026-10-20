@@ -223,3 +223,25 @@ async def test_notify_during_cycle_drains_at_next_boundary() -> None:
         tool_result_idx = kinds.index(EventKind.TOOL_RESULT)
         user_indices = [i for i, k in enumerate(kinds) if k == EventKind.MESSAGE_USER]
         assert user_indices[-1] > tool_result_idx
+
+
+async def test_post_condition_error_ends_the_cycle() -> None:
+    """A ``PostConditionError`` from a post-condition reaches the caller after one attempt, without a retry."""
+    from ai_functions.ai_thread import PostConditionError
+
+    @ai_function[str](structured_output=False)
+    def _fn(prompt: str) -> str:
+        return prompt
+
+    calls: list[str] = []
+
+    def broken(result: str) -> PostConditionResult:
+        calls.append(result)
+        raise PostConditionError("the checker is unavailable")
+
+    async with RuntimeHarness() as h:
+        model = ScriptedModel([Turn(text="try 1"), Turn(text="try 2"), Turn(text="try 3")])
+        handle = await h.spawn(_fn.replace(model=model, post_conditions=[broken], max_attempts=2))
+        with pytest.raises(PostConditionError, match="the checker is unavailable"):
+            await handle.run("go")
+        assert len(calls) == 1

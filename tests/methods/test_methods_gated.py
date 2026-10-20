@@ -119,6 +119,43 @@ class ValuePicker(Picker):
         return response.value
 
 
+def must_be_even(response: Pick) -> None:
+    """A post-condition declared on the method itself, beside the gate."""
+    if response.value % 2:
+        raise ValueError(f"{response.value} is odd; propose an even value")
+
+
+class EvenPicker(GatedProposer):
+    name = "even"
+
+    @ai_method(Pick, description="Propose an even value", max_attempts=3, post_conditions=[must_be_even])
+    def propose(self, hint: str) -> Pick:
+        """Propose a value given {hint}."""
+        ...
+
+
+class SeedPicker(GatedProposer):
+    """A propose parameter named like a ``propose_k`` keyword."""
+
+    name = "seeded"
+
+    @ai_method(Pick, description="Propose a value from a seed", max_attempts=1)
+    def propose(self, seed: str) -> Pick:
+        """Propose a value from {seed}."""
+        ...
+
+
+class KPicker(GatedProposer):
+    """A propose parameter named like ``propose_k``'s positional-only ``k``."""
+
+    name = "kpicker"
+
+    @ai_method(Pick, description="Propose one of k values", max_attempts=1)
+    def propose(self, k: int) -> Pick:
+        """Propose one of {k} values."""
+        ...
+
+
 class CollidingPicker(GatedProposer):
     """A proposer whose propose parameter is named ``response``, like ``admits``'s first one.
 
@@ -748,6 +785,110 @@ async def test_the_beam_shares_a_coordinator_with_its_caller() -> None:
 
         assert seen == [2, 2], "the beam's threads are not on the caller's coordinator"
         assert await live_threads(harness) == []
+
+
+async def test_a_gate_fault_ends_the_gated_call_instead_of_burning_its_retries() -> None:
+    """G3: a broken gate reaches the caller after the first proposal; the model never sees it as feedback."""
+
+    def broken(candidate: Pick) -> Threshold:
+        raise KeyError("floor")
+
+    async with RuntimeHarness():
+        picker = Picker(broken)
+        model = picks([9, 9, 9, 9])
+
+        with pytest.raises(GateFaultError, match=r"fault in the gate rather than a verdict"):
+            await picker.gated(model=model)(hint="go")
+
+        assert len(model.contexts) == 1
+        assert picker.rejected == []
+
+
+def test_gated_refuses_an_async_gate_before_any_model_call() -> None:
+    """G4: ``gated()`` runs the gate as a synchronous post-condition, so an async gate is a wiring error."""
+
+    async def slow(candidate: Pick) -> Threshold:
+        return Threshold(candidate.value, 5)
+
+    with pytest.raises(WiringError, match=r"the gate is async"):
+        Picker(slow).gated()
+
+
+async def test_gated_keeps_the_methods_own_post_conditions() -> None:
+    """G1: the gate first, then the post-conditions declared on the method, then the caller's."""
+
+    def extra(response: Pick) -> None:
+        del response
+
+    picker = EvenPicker(floor_gate(5))
+    assert picker.gated(post_conditions=[extra]).config.post_conditions == (picker.admits, must_be_even, extra)
+
+    async with RuntimeHarness():
+        model = picks([7, 8])
+        result = await picker.gated(model=model)(hint="go")
+
+        assert result.value == 8
+        assert len(model.contexts) == 2
+        assert any("7 is odd; propose an even value" in prompt for prompt in model.prompts(1))
+        assert picker.rejected == []
+
+
+async def test_the_beam_skips_the_methods_own_post_conditions() -> None:
+    """G6: one shot per branch even when the method declares post-conditions that would retry."""
+    async with RuntimeHarness() as harness:
+        picker = EvenPicker(floor_gate(5))
+        model = picks([7, 9, 11])
+        picker.compiled = _scripting(picker, model)  # type: ignore[method-assign]
+
+        admitted = await picker.propose_k(3, harness.coordinator, hint="go")
+
+        assert [candidate.value for candidate, _ in admitted] == [7, 9, 11]
+        assert len(model.contexts) == 3
+        assert await live_threads(harness) == []
+
+
+async def test_propose_k_refuses_a_method_parameter_named_like_its_own_keywords() -> None:
+    async with RuntimeHarness() as harness:
+        with pytest.raises(WiringError, match=r"propose_k's own keywords"):
+            await SeedPicker(floor_gate(5)).propose_k(2, harness.coordinator, seed="abc")
+        assert await live_threads(harness) == []
+
+
+async def test_a_method_parameter_named_k_reaches_the_method() -> None:
+    """``k`` and ``coordinator`` are positional-only, so a propose parameter of either name passes through."""
+    async with RuntimeHarness() as harness:
+        picker = KPicker(floor_gate(5))
+        model = picks([9])
+        picker.compiled = _scripting(picker, model)  # type: ignore[method-assign]
+
+        admitted = await picker.propose_k(1, harness.coordinator, k=7)
+
+        assert [candidate.value for candidate, _ in admitted] == [9]
+        assert any("Propose one of 7 values." in prompt for prompt in model.prompts(0))
+
+
+async def test_propose_k_retires_the_other_branches_when_one_retirement_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """G6: one failed teardown neither stops the unwind nor goes unreported."""
+    from ai_functions.handle import ThreadHandle
+
+    original = ThreadHandle.terminate_now
+    failed: list[str] = []
+
+    async def flaky(self: ThreadHandle[..., Any]) -> None:
+        if not failed:
+            failed.append(self.id)
+            raise ConnectionError("worker unreachable")
+        await original(self)
+
+    async with RuntimeHarness() as harness:
+        picker = Picker(floor_gate(5))
+        picker.compiled = _scripting(picker, picks([9, 9, 9]))  # type: ignore[method-assign]
+        monkeypatch.setattr(ThreadHandle, "terminate_now", flaky)
+
+        with pytest.raises(ConnectionError, match="worker unreachable"):
+            await picker.propose_k(3, harness.coordinator, hint="go")
+
+        assert await live_threads(harness) == failed
 
 
 # ── The error family and the package boundary (added by this port) ──

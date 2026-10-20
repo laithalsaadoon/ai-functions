@@ -17,7 +17,7 @@ from .config import (
     ThreadMergedKwargs,
     split_config_and_agent_kwargs,
 )
-from .errors import AIFunctionError, ValidationError
+from .errors import AIFunctionError, PostConditionError, ValidationError
 from .postcondition import PostCondition, PostConditionResult
 from .reconstruction import reconstruct_messages, render_renderable_events
 from .summarization import (
@@ -40,6 +40,7 @@ __all__ = [
     "DefaultSummarizationStrategy",
     "OutputSpec",
     "PostCondition",
+    "PostConditionError",
     "PostConditionResult",
     "reconstruct_messages",
     "render_renderable_events",

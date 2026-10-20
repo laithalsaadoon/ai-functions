@@ -228,3 +228,15 @@ async def test_events_are_frozen() -> None:
         sample = events[0]
         with pytest.raises(Exception):  # noqa: B017, PT011 -- pydantic raises ValidationError
             sample.thread_id = ThreadId("thr-injected")  # type: ignore[misc]
+
+
+def test_replace_takes_an_explicit_agent_kwargs() -> None:
+    """An explicit ``agent_kwargs=`` replaces the base's, and loose ``Agent`` kwargs merge over it."""
+
+    @ai_function[str](agent_kwargs={"agent_id": "base", "name": "kept?"})
+    def _fn(prompt: str) -> str:
+        return prompt
+
+    replaced = _fn.replace(agent_kwargs={"agent_id": "a"}, description="d", callback_handler=None)
+    assert replaced.config.agent_kwargs == {"agent_id": "a", "callback_handler": None}
+    assert replaced.config.description == "d"

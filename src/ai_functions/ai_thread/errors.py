@@ -31,3 +31,11 @@ class ValidationError(AIFunctionError):
         self.validation_errors = errors
         msg = "; ".join(f"{k}: {v}" for k, v in errors.items())
         super().__init__(msg, function_name=function_name)
+
+
+class PostConditionError(AIFunctionError):
+    """A post-condition could not evaluate the result.
+
+    Raised from a post-condition, it ends the cycle with this error instead of
+    becoming validation feedback for the model's next attempt.
+    """
